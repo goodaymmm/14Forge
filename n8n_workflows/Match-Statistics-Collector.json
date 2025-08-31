@@ -1,0 +1,423 @@
+{
+  "name": "Match-Statistics-Collector",
+  "nodes": [
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "success"
+            },
+            {
+              "name": "message",
+              "value": "Build collection completed"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "total_processed",
+              "value": "={{ $input.all().length }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0e897f65-d5ac-446f-ad77-138a706c7e26",
+      "name": "Completion Status",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        1504,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "unit": "seconds"
+      },
+      "id": "27f079d1-8b0c-4225-9c60-3d4f3c7efd36",
+      "name": "Wait 1 second",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        960,
+        256
+      ],
+      "webhookId": "65413a4a-5e57-4a37-9bd0-750a75c6dc6b"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store merged statistical data\nconst items = $input.all();\nconsole.log(`Storing ${items.length} champion stat entries`);\n\nconst results = [];\nconst currentDate = new Date().toISOString().split('T')[0];\nconst storageKey = `processed_${currentDate}`;\n\n// Get current processed list\nlet processedChampions = [];\ntry {\n  processedChampions = $getWorkflowStaticData(storageKey) || [];\n} catch (error) {\n  console.log('Could not retrieve processed list:', error.message);\n}\n\nfor (const item of items) {\n  const data = item.json;\n  \n  if (!data || !data.championId) {\n    console.log('Skipping invalid data');\n    continue;\n  }\n  \n  console.log(`Storing stats for ${data.championId} ${data.role}`);\n  console.log(`  Combined WR: ${data.combinedStats?.winRate?.toFixed(2)}%`);\n  console.log(`  Combined PR: ${data.combinedStats?.pickRate?.toFixed(2)}%`);\n  \n  // Add to processed list\n  const itemKey = `${data.championId}_${data.role}_${data.patch_version}`;\n  if (!processedChampions.includes(itemKey)) {\n    processedChampions.push(itemKey);\n  }\n  \n  results.push({\n    championId: data.championId,\n    role: data.role,\n    patchVersion: data.patch_version,\n    status: 'stored',\n    combinedStats: data.combinedStats,\n    timestamp: new Date().toISOString()\n  });\n}\n\n// Update processed list\ntry {\n  $setWorkflowStaticData(storageKey, processedChampions);\n  console.log(`Updated processed list: ${processedChampions.length} items`);\n} catch (error) {\n  console.log('Could not update processed list:', error.message);\n}\n\nconsole.log(`Storage complete: ${results.length} items stored`);\nreturn results.map(result => ({ json: result }));"
+      },
+      "id": "81e8893e-bc19-41d9-ac7e-4823fb81a411",
+      "name": "Store Champion Stats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        -80
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process and merge data with median calculation\nconst allInputs = $input.all();\n\nconsole.log(`Processing ${allInputs.length} merged champion data`);\n\nconst finalResults = [];\n\n// Helper function to calculate median\nfunction calculateMedian(values) {\n  const validValues = values.filter(v => v !== null && v !== undefined && !isNaN(v));\n  if (validValues.length === 0) return null;\n  if (validValues.length === 1) return validValues[0];\n  \n  const sorted = validValues.sort((a, b) => a - b);\n  const mid = Math.floor(sorted.length / 2);\n  \n  if (sorted.length % 2 === 0) {\n    return (sorted[mid - 1] + sorted[mid]) / 2;\n  }\n  return sorted[mid];\n}\n\n// Process each merged item\nfor (const input of allInputs) {\n  const opggData = input.json.opgg_data?.stats || {};\n  const mobalyticsData = input.json.mobalytics_data?.stats || {};\n  \n  // Skip if no data from either source\n  if (!input.json.championId) {\n    console.log('Skipping item without championId');\n    continue;\n  }\n  \n  // Calculate median stats from both sources\n  const combinedStats = {\n    winRate: calculateMedian([opggData.winRate, mobalyticsData.winRate]),\n    pickRate: calculateMedian([opggData.pickRate, mobalyticsData.pickRate]),\n    banRate: calculateMedian([opggData.banRate, mobalyticsData.banRate]),\n    matches: mobalyticsData.matches || null, // Only from Mobalytics\n    sources: {\n      opgg: {\n        winRate: opggData.winRate,\n        pickRate: opggData.pickRate,\n        banRate: opggData.banRate,\n        success: input.json.opgg_data?.success || false\n      },\n      mobalytics: {\n        winRate: mobalyticsData.winRate,\n        pickRate: mobalyticsData.pickRate,\n        banRate: mobalyticsData.banRate,\n        matches: mobalyticsData.matches,\n        success: input.json.mobalytics_data?.success || false\n      }\n    }\n  };\n  \n  // Create final data structure\n  const finalData = {\n    championId: input.json.championId,\n    championName: input.json.championName,\n    role: input.json.role,\n    patch_version: input.json.patch_version,\n    combinedStats: combinedStats,\n    rolePickRates: opggData.rolePickRates || {},\n    matchups: input.json.mobalytics_data?.matchups || { weakAgainst: [], strongAgainst: [] },\n    timestamp: new Date().toISOString(),\n    dataQuality: {\n      hasOpggData: !!opggData.winRate,\n      hasMobalyticsData: !!mobalyticsData.winRate,\n      isComplete: !!combinedStats.winRate && !!combinedStats.pickRate\n    }\n  };\n  \n  console.log(`Processed ${finalData.championId} ${finalData.role}:`);\n  console.log(`  OP.GG WR: ${opggData.winRate || 'N/A'}% → Mobalytics WR: ${mobalyticsData.winRate || 'N/A'}% → Median: ${combinedStats.winRate?.toFixed(2) || 'N/A'}%`);\n  \n  finalResults.push(finalData);\n}\n\nconsole.log(`\\nProcessed ${finalResults.length} champions with median stats`);\nconst completeData = finalResults.filter(r => r.dataQuality.isComplete).length;\nconsole.log(`Complete data: ${completeData}/${finalResults.length}`);\n\nreturn finalResults.map(result => ({ json: result }));"
+      },
+      "id": "2275f398-65e4-406f-8145-dda2b7233171",
+      "name": "Process Merged Data with Median",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "f36f0d98-445c-4f54-8a00-25e593b9818e",
+      "name": "Merge Sources by Position",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        368,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scrape OP.GG Browser API v5.3 - Further optimized\nconst items = $input.all();\nconsole.log(`Processing ${items.length} OP.GG URLs`);\n\nconst puppeteer = require('puppeteer-core');\n\n// ==================== Configuration ====================\nfunction createConfig() {\n  const password = typeof $env !== 'undefined' ? $env.BRIGHTDATA_PASSWORD : process.env.BRIGHTDATA_PASSWORD;\n  if (!password) {\n    throw new Error('BRIGHTDATA_PASSWORD environment variable is not set');\n  }\n  \n  return {\n    zoneUser: 'brd-customer-hl_0d05da78-zone-lol_stats_unlocker',\n    password: password,\n    connectTimeout: 120000,      // 120 seconds\n    navigationTimeout: 120000,   // 2 minutes\n    selectorTimeout: 8000,       // 8 seconds (reduced from 10)\n    renderWait: 2000,           // 2 seconds (reduced from 3)\n    maxRetries: 3\n  };\n}\n\n// ==================== Utility Functions ====================\nfunction getErrorDetails(error) {\n  if (error?.target?._req?.res) {\n    const { statusCode, statusMessage } = error.target._req.res;\n    return `Server Status ${statusCode}: ${statusMessage}`;\n  }\n  return error?.message || error?.toString() || JSON.stringify(error);\n}\n\nasync function resolveDNS(identifier) {\n  const dns = require('dns');\n  const util = require('util');\n  const resolve4 = util.promisify(dns.resolve4);\n  \n  try {\n    console.log(`[${identifier}] Pre-resolving DNS...`);\n    const addresses = await resolve4('brd.superproxy.io');\n    console.log(`[${identifier}] DNS resolved: ${addresses[0]}`);\n    await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000\n  } catch (error) {\n    console.log(`[${identifier}] DNS pre-resolution failed: ${error.message}`);\n  }\n}\n\nasync function createBrowser(config, identifier) {\n  const wsEndpoint = `wss://${config.zoneUser}:${config.password}@brd.superproxy.io:9222`;\n  console.log(`[${identifier}] Connecting to BrightData...`);\n  \n  const browser = await puppeteer.connect({\n    browserWSEndpoint: wsEndpoint,\n    timeout: config.connectTimeout\n  });\n  \n  console.log(`[${identifier}] Connected`);\n  return browser;\n}\n\nasync function setupPage(browser, url, config, identifier) {\n  const page = await browser.newPage();\n  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');\n  \n  // Navigate with wait strategies\n  await page.goto(url, {\n    waitUntil: 'networkidle2',\n    timeout: config.navigationTimeout\n  });\n  \n  // Reduced wait for JavaScript execution\n  console.log(`[${identifier}] Page loading...`);\n  await new Promise(resolve => setTimeout(resolve, 2000)); // Reduced from 3000\n  \n  // Quick scroll\n  await page.evaluate(() => window.scrollBy(0, 500));\n  await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000\n  \n  // Wait for stats elements\n  await page.waitForSelector('li em, li b', {\n    timeout: config.selectorTimeout\n  });\n  \n  // Final render wait\n  await new Promise(resolve => setTimeout(resolve, config.renderWait));\n  \n  return page;\n}\n\n// ==================== OP.GG Stats Extraction ====================\nfunction extractOPGGData() {\n  const result = {\n    stats: {\n      winRate: null,\n      pickRate: null,\n      banRate: null,\n      rolePickRates: {}\n    }\n  };\n  \n  // Extract stats from <li> elements\n  document.querySelectorAll('li').forEach(li => {\n    const label = li.querySelector('em')?.textContent || '';\n    const value = li.querySelector('b')?.textContent || '';\n    \n    if (label.toLowerCase().includes('win rate')) {\n      const match = value.match(/([0-9]+\\.?[0-9]*)/);\n      if (match) result.stats.winRate = parseFloat(match[1]);\n    }\n    if (label.toLowerCase().includes('pick rate')) {\n      const match = value.match(/([0-9]+\\.?[0-9]*)/);\n      if (match) result.stats.pickRate = parseFloat(match[1]);\n    }\n    if (label.toLowerCase().includes('ban rate')) {\n      const match = value.match(/([0-9]+\\.?[0-9]*)/);\n      if (match) result.stats.banRate = parseFloat(match[1]);\n    }\n  });\n  \n  // Extract role pick rates\n  document.querySelectorAll('a[href*=\"/build/\"]').forEach(link => {\n    const text = link.textContent || '';\n    const href = link.getAttribute('href') || '';\n    const match = text.match(/([0-9]+)%/);\n    \n    if (match) {\n      const percentage = parseFloat(match[1]);\n      if (href.includes('/jungle')) result.stats.rolePickRates['Jungle'] = percentage;\n      else if (href.includes('/top')) result.stats.rolePickRates['Top'] = percentage;\n      else if (href.includes('/mid')) result.stats.rolePickRates['Mid'] = percentage;\n      else if (href.includes('/adc') || href.includes('/bottom')) result.stats.rolePickRates['ADC'] = percentage;\n      else if (href.includes('/support')) result.stats.rolePickRates['Support'] = percentage;\n    }\n  });\n  \n  return result;\n}\n\n// ==================== Main Scraping Function ====================\nasync function scrapeWithRetry(item, config) {\n  const { championName, role } = item.json;\n  const identifier = `${championName} ${role}`;\n  let lastError;\n  \n  // DNS pre-resolution\n  await resolveDNS(identifier);\n  \n  // Retry logic\n  for (let attempt = 1; attempt <= config.maxRetries; attempt++) {\n    let browser;\n    \n    try {\n      console.log(`[${identifier}] Attempt ${attempt}/${config.maxRetries}`);\n      \n      // Reduced delay between retries\n      if (attempt > 1) {\n        const delay = attempt * 1000; // Reduced from 2000\n        console.log(`[${identifier}] Retry in ${delay/1000}s...`);\n        await new Promise(resolve => setTimeout(resolve, delay));\n      } else {\n        await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced from 2000\n      }\n      \n      // Connect and setup\n      browser = await createBrowser(config, identifier);\n      const page = await setupPage(browser, item.json.opgg_url, config, identifier);\n      \n      // Extract data\n      const data = await page.evaluate(extractOPGGData);\n      await browser.close();\n      \n      // Validate data\n      const hasValidData = data.stats.winRate !== null || \n                          data.stats.pickRate !== null;\n      \n      if (hasValidData) {\n        console.log(`✅ [${identifier}] WR ${data.stats.winRate}%, PR ${data.stats.pickRate}%`);\n        \n        return {\n          json: {\n            ...item.json,\n            opgg_data: data,\n            attempt: attempt,\n            success: true\n          }\n        };\n      }\n      \n      lastError = new Error('No valid data extracted');\n      console.log(`⚠️ [${identifier}] No data, retrying...`);\n      \n    } catch (error) {\n      lastError = error;\n      const errorDetails = getErrorDetails(error);\n      console.log(`[ERROR] [${identifier}] ${errorDetails}`);\n      \n      if (browser) {\n        try { await browser.close(); } catch (e) {}\n      }\n    }\n  }\n  \n  // All attempts failed\n  console.log(`❌ [${identifier}] Failed`);\n  return {\n    json: {\n      ...item.json,\n      opgg_data: {\n        stats: { winRate: null, pickRate: null, banRate: null, rolePickRates: {} }\n      },\n      error: getErrorDetails(lastError),\n      success: false\n    }\n  };\n}\n\n// ==================== Main Execution ====================\nconst startTime = Date.now();\nconst config = createConfig();\n\ntry {\n  const results = await Promise.all(\n    items.map(item => scrapeWithRetry(item, config))\n  );\n  \n  const duration = ((Date.now() - startTime) / 1000).toFixed(1);\n  const successCount = results.filter(r => r.json.success).length;\n  \n  console.log(`\\n📊 OP.GG Summary: ${duration}s, ${successCount}/${results.length} success`);\n  \n  return results;\n  \n} catch (error) {\n  console.log('[ERROR] Fatal error:', getErrorDetails(error));\n  throw error;\n}"
+      },
+      "id": "3b3970dc-02de-4260-9406-09aa26c2c55d",
+      "name": "Scrape OP.GG Browser API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        -176
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate URLs for scraping - Process ALL items in the batch\nconst items = $input.all();\nconst timestamp = new Date().toISOString();\nconsole.log(`[${timestamp}] Generating URLs for ${items.length} champions`);\n\nconst results = [];\n\nfor (const item of items) {\n  // Keep original case for champion name\n  const championOriginal = item.json.championId;\n  const championLower = championOriginal.toLowerCase();\n  \n  // Format role properly\n  const roleOriginal = item.json.role;\n  const roleFormatted = roleOriginal.charAt(0).toUpperCase() + roleOriginal.slice(1).toLowerCase();\n  const roleLower = roleOriginal.toLowerCase();\n  \n  const urlData = {\n    ...item.json,\n    mergeKey: `${championOriginal}_${roleOriginal}`, // Merge key for later\n    opgg_url: `https://op.gg/lol/champions/${championLower}/build/${roleLower}?region=global`,\n    mobalytics_url: `https://mobalytics.gg/lol/champions/${championLower}/build/${roleLower}`\n  };\n  \n  console.log(`Generated URLs for ${championOriginal} ${roleFormatted}`);\n  results.push({ json: urlData });\n}\n\nconsole.log(`Total URLs generated: ${results.length}`);\nreturn results;"
+      },
+      "id": "068bf666-fc5b-4b33-be47-e122708c924a",
+      "name": "Generate Scraping URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "f005cdda-09e2-4ca4-953d-3f88c0dcb294",
+      "name": "Process in Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare Work Items with Role-Specific Champions\nconst roleData = $input.all();\nconsole.log(`Received data from ${roleData.length} role scrapers`);\n\n// Build champion-role mapping\nconst validCombinations = {};\nlet totalChampions = 0;\n\nfor (const item of roleData) {\n  const role = item.json.role;\n  const champions = item.json.champions || [];\n  \n  console.log(`${role}: ${champions.length} champions`);\n  totalChampions += champions.length;\n  \n  for (const champion of champions) {\n    // Normalize champion name\n    const normalizedName = champion\n      .replace(/[\\s']/g, '') // Remove spaces and apostrophes\n      .replace(/\\./g, '') // Remove dots\n      .toLowerCase();\n    \n    if (!validCombinations[normalizedName]) {\n      validCombinations[normalizedName] = [];\n    }\n    validCombinations[normalizedName].push(role);\n  }\n}\n\nconsole.log(`Total valid combinations: ${totalChampions}`);\nconsole.log(`Unique champions: ${Object.keys(validCombinations).length}`);\n\n// Get patch version\n  const patchData = $('Get Current Patch').item.json;\n  const patchVersion = patchData.version;\n\n  if (!patchVersion) {\n    throw new Error('Could not fetch current patch version');\n  }\n\n  console.log(`Using patch version: ${patchVersion}`);\n\n// Generate work items for valid champion-role combinations only\nconst workItems = [];\n\nfor (const [championName, roles] of Object.entries(validCombinations)) {\n  for (const role of roles) {\n    // Capitalize first letter for display\n    const displayName = championName.charAt(0).toUpperCase() + championName.slice(1);\n    \n    workItems.push({\n      championId: championName,\n      championName: displayName,\n      role: role,\n      patch_version: patchVersion,\n      itemKey: `${championName}_${role}`,\n      mergeKey: `${championName}_${role}`\n    });\n  }\n}\n\nconsole.log(`Generated ${workItems.length} work items for valid champion-role combinations`);\n\n// Store role data for caching (24 hours)\nconst cacheKey = `role_data_${new Date().toISOString().split('T')[0]}`;\ntry {\n  $setWorkflowStaticData(cacheKey, validCombinations);\n  console.log('Role data cached for 24 hours');\n} catch (e) {\n  console.log('Failed to cache role data:', e.message);\n}\n\nreturn workItems.map(item => ({ json: item }));"
+      },
+      "id": "b8d240af-1068-47e3-a32a-840d81b95021",
+      "name": "Prepare Work Items (Filtered)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -416,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scrape Champion by Role - Optimized version\nconst items = $input.all();\nconsole.log(`Processing ${items.length} roles for scraping`);\n\nconst puppeteer = require('puppeteer-core');\n\n// BrightData credentials\nconst ZONE_USER = 'brd-customer-hl_0d05da78-zone-lol_stats_unlocker';\nconst ZONE_PASSWORD = typeof $env !== 'undefined' ? $env.BRIGHTDATA_PASSWORD : process.env.BRIGHTDATA_PASSWORD;\nif (!ZONE_PASSWORD) {\n  throw new Error('BRIGHTDATA_PASSWORD environment variable is not set');\n}\n\n// Optimized timeout settings\nconst CONNECT_TIMEOUT = 120000;   // 120 seconds\nconst NAVIGATION_TIMEOUT = 120000; // 2 minutes\nconst SELECTOR_TIMEOUT = 10000;   // 10 seconds (reduced from 15)\nconst RENDER_WAIT = 1500;         // 1.5 seconds (reduced from 2)\n\nfunction getErrorDetails(error) {\n  if (error?.target?._req?.res) {\n    const { statusCode, statusMessage } = error.target._req.res;\n    return `Server Status ${statusCode}: ${statusMessage}`;\n  }\n  return error?.message || error?.toString() || JSON.stringify(error);\n}\n\n// Function to scrape a single role\nasync function scrapeRole(item) {\n  const role = item.json.role;\n  const url = item.json.url;\n  \n  console.log(`Starting scraping for role: ${role}`);\n  \n  // DNS pre-resolution\n  const dns = require('dns');\n  const util = require('util');\n  const resolve4 = util.promisify(dns.resolve4);\n  \n  try {\n    console.log(`[${role}] Pre-resolving DNS...`);\n    const addresses = await resolve4('brd.superproxy.io');\n    console.log(`[${role}] DNS resolved: ${addresses[0]}`);\n    await new Promise(resolve => setTimeout(resolve, 500)); // Reduced\n  } catch (dnsError) {\n    console.log(`[${role}] DNS pre-resolution failed: ${dnsError.message}`);\n  }\n  \n  let browser;\n  let lastError;\n  let champions = [];\n  \n  const SBR_WS_ENDPOINT = `wss://brd-customer-hl_0d05da78-zone-lol_stats_unlocker:${ZONE_PASSWORD}@brd.superproxy.io:9222`;\n  \n  // Retry logic with reduced delays\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      console.log(`[${role}] Attempt ${attempt}/3`);\n      \n      // Reduced delays\n      if (attempt > 1) {\n        const delay = attempt * 1000; // Reduced from 2000\n        console.log(`[${role}] Retry in ${delay/1000}s...`);\n        await new Promise(resolve => setTimeout(resolve, delay));\n      } else {\n        await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced from 2000\n      }\n      \n      browser = await puppeteer.connect({\n        browserWSEndpoint: SBR_WS_ENDPOINT\n      });\n      \n      console.log(`[${role}] Connected to BrightData`);\n      \n      const page = await browser.newPage();\n      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');\n      \n      // Navigate\n      await page.goto(url, {\n        waitUntil: 'networkidle2',\n        timeout: NAVIGATION_TIMEOUT\n      });\n      \n      // Wait for champion list\n      await page.waitForSelector('table, [class*=\"champion\"], [class*=\"tier-list\"]', {\n        timeout: SELECTOR_TIMEOUT\n      });\n      \n      // Reduced render wait\n      await new Promise(resolve => setTimeout(resolve, RENDER_WAIT));\n      \n      // Extract champion names\n      champions = await page.evaluate(() => {\n        const championNames = new Set();\n        \n        // Find the ranking table\n        const tables = document.querySelectorAll('table');\n        let rankingTable = null;\n        \n        for (const table of tables) {\n          if (table.closest('aside')) continue;\n          \n          const headers = table.querySelectorAll('thead th, thead td');\n          const headerText = Array.from(headers).map(h => h.textContent).join(' ');\n          if (headerText.includes('Win rate') || headerText.includes('Pick rate') ||\n              headerText.includes('Tier') || headerText.includes('Champion')) {\n            rankingTable = table;\n            break;\n          }\n        }\n        \n        // Extract from ranking table\n        if (rankingTable) {\n          const rows = rankingTable.querySelectorAll('tbody tr');\n          rows.forEach(row => {\n            const championCell = row.querySelector('td:nth-child(2)');\n            if (championCell) {\n              const link = championCell.querySelector('a');\n              if (link) {\n                const strongEl = link.querySelector('strong');\n                let name = strongEl ? strongEl.textContent : link.textContent;\n                name = name.trim();\n                \n                if (name && name.length > 1 && name.length < 30 && !name.includes('%')) {\n                  name = name.replace(/\\s+\\d+$/, '').trim();\n                  championNames.add(name);\n                }\n              }\n            }\n          });\n        }\n        \n        return Array.from(championNames);\n      });\n      \n      await browser.close();\n      \n      if (champions.length > 0) {\n        console.log(`✅ Found ${champions.length} ${role} champions`);\n        return {\n          json: {\n            role: role,\n            champions: champions,\n            count: champions.length,\n            attempt: attempt\n          }\n        };\n      }\n      \n      console.log(`⚠️ No champions found for ${role}`);\n      break;\n      \n    } catch (error) {\n      lastError = error;\n      const errorDetails = getErrorDetails(error);\n      console.log(`[ERROR] [${role}] ${errorDetails}`);\n      \n      if (browser) {\n        try { await browser.close(); } catch (e) {}\n      }\n    }\n  }\n  \n  // Failed\n  console.log(`❌ Failed to scrape ${role}`);\n  return {\n    json: {\n      role: role,\n      champions: [],\n      count: 0,\n      error: lastError ? getErrorDetails(lastError) : 'No champions found'\n    }\n  };\n}\n\n// Process all roles sequentially\nconst startTime = Date.now();\n\ntry {\n  const results = [];\n  \n  for (const item of items) {\n    try {\n      const result = await scrapeRole(item);\n      results.push(result);\n    } catch (error) {\n      const errorMessage = getErrorDetails(error);\n      console.log(`[ERROR] Fatal error for ${item.json.role}: ${errorMessage}`);\n      results.push({\n        json: {\n          role: item.json.role,\n          champions: [],\n          count: 0,\n          error: errorMessage\n        }\n      });\n    }\n  }\n  \n  const duration = ((Date.now() - startTime) / 1000).toFixed(1);\n  const successCount = results.filter(r => r.json.count > 0).length;\n  const totalChampions = results.reduce((sum, r) => sum + r.json.count, 0);\n  \n  console.log(`\\n📊 Summary: ${duration}s, ${successCount}/${results.length} roles, ${totalChampions} champions`);\n  \n  return results;\n  \n} catch (error) {\n  console.log('[ERROR] Fatal error:', getErrorDetails(error));\n  throw error;\n}"
+      },
+      "id": "86d65d17-61d6-457b-8f4d-d270b02794f4",
+      "name": "Scrape Champion by Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -560,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare Role URLs for scraping\nconst roles = [\n  { role: 'TOP', position: 'top' },\n  { role: 'JUNGLE', position: 'jungle' },\n  { role: 'MIDDLE', position: 'mid' },\n  { role: 'BOTTOM', position: 'adc' },\n  { role: 'SUPPORT', position: 'support' }\n];\n\nconsole.log('Preparing URLs for', roles.length, 'roles');\n\nconst results = roles.map(r => ({\n  json: {\n    role: r.role,\n    position: r.position,\n    url: `https://op.gg/lol/champions?position=${r.position}`\n  }\n}));\n\nconsole.log('URLs prepared:', results.map(r => r.json.role).join(', '));\n\nreturn results;"
+      },
+      "id": "096edc38-582d-4945-82cc-cd424fcfa1f0",
+      "name": "Prepare Role URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 * * *"
+            }
+          ]
+        }
+      },
+      "id": "2bb8ed32-d1b7-4cae-b3f9-beeca6b958c5",
+      "name": "Daily at 3 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -1040,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scrape Mobalytics Browser API v5.3 - Further optimized\nconst items = $input.all();\nconsole.log(`Processing ${items.length} Mobalytics URLs`);\n\nconst puppeteer = require('puppeteer-core');\n\n// ==================== Configuration ====================\nfunction createConfig() {\n  const password = typeof $env !== 'undefined' ? $env.BRIGHTDATA_PASSWORD : process.env.BRIGHTDATA_PASSWORD;\n  if (!password) {\n    throw new Error('BRIGHTDATA_PASSWORD environment variable is not set');\n  }\n  \n  return {\n    zoneUser: 'brd-customer-hl_0d05da78-zone-lol_stats_unlocker',\n    password: password,\n    connectTimeout: 120000,      // 120 seconds\n    navigationTimeout: 120000,   // 2 minutes\n    selectorTimeout: 8000,       // 8 seconds (reduced from 10)\n    renderWait: 2000,           // 2 seconds (reduced from 3)\n    maxRetries: 3\n  };\n}\n\n// ==================== Utility Functions ====================\nfunction getErrorDetails(error) {\n  if (error?.target?._req?.res) {\n    const { statusCode, statusMessage } = error.target._req.res;\n    return `Server Status ${statusCode}: ${statusMessage}`;\n  }\n  return error?.message || error?.toString() || JSON.stringify(error);\n}\n\nfunction extractNumber(text) {\n  if (!text) return null;\n  const match = text.match(/([0-9]+\\.?[0-9]*)/);\n  return match ? parseFloat(match[1]) : null;\n}\n\nasync function resolveDNS(identifier) {\n  const dns = require('dns');\n  const util = require('util');\n  const resolve4 = util.promisify(dns.resolve4);\n  \n  try {\n    console.log(`[${identifier}] Pre-resolving DNS...`);\n    const addresses = await resolve4('brd.superproxy.io');\n    console.log(`[${identifier}] DNS resolved: ${addresses[0]}`);\n    await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000\n  } catch (error) {\n    console.log(`[${identifier}] DNS pre-resolution failed: ${error.message}`);\n  }\n}\n\nasync function createBrowser(config, identifier) {\n  const wsEndpoint = `wss://${config.zoneUser}:${config.password}@brd.superproxy.io:9222`;\n  console.log(`[${identifier}] Connecting to BrightData...`);\n  \n  const browser = await puppeteer.connect({\n    browserWSEndpoint: wsEndpoint,\n    timeout: config.connectTimeout\n  });\n  \n  console.log(`[${identifier}] Connected`);\n  return browser;\n}\n\nasync function setupPage(browser, url, config, identifier) {\n  const page = await browser.newPage();\n  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');\n  \n  // Navigate\n  await page.goto(url, {\n    waitUntil: 'networkidle2',\n    timeout: config.navigationTimeout\n  });\n  \n  // Reduced wait\n  console.log(`[${identifier}] Page loading...`);\n  await new Promise(resolve => setTimeout(resolve, 2000)); // Reduced from 3000\n  \n  // Quick scroll\n  await page.evaluate(() => window.scrollBy(0, 500));\n  await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000\n  \n  // Wait for stats elements\n  await page.waitForSelector('tr.m-crnec4, td.m-1wnuvga, td.m-197vfit, tr[class*=\"m-\"]', {\n    timeout: config.selectorTimeout\n  });\n  \n  // Final render wait\n  await new Promise(resolve => setTimeout(resolve, config.renderWait));\n  \n  return page;\n}\n\n// ==================== Mobalytics Stats & Matchups Extraction ====================\nfunction extractMobalyticsData() {\n  const extractNumber = (text) => {\n    if (!text) return null;\n    const match = text.match(/([0-9]+\\.?[0-9]*)/);\n    return match ? parseFloat(match[1]) : null;\n  };\n  \n  const result = {\n    stats: {\n      winRate: null,\n      pickRate: null,\n      banRate: null,\n      matches: null\n    },\n    matchups: {\n      weakAgainst: [],\n      strongAgainst: []\n    }\n  };\n  \n  // Extract stats\n  const tableRows = document.querySelectorAll('tr.m-crnec4, tr[class*=\"m-\"]');\n  tableRows.forEach(row => {\n    const cells = row.querySelectorAll('td');\n    if (cells.length >= 2) {\n      const label = cells[0].textContent || '';\n      const value = cells[1].textContent || '';\n      \n      if (label.toLowerCase().includes('win rate')) {\n        result.stats.winRate = extractNumber(value);\n      } else if (label.toLowerCase().includes('pick rate')) {\n        result.stats.pickRate = extractNumber(value);\n      } else if (label.toLowerCase().includes('ban rate')) {\n        result.stats.banRate = extractNumber(value);\n      } else if (label.toLowerCase().includes('matches')) {\n        const cleanValue = value.replace(/\\s/g, '').replace(/,/g, '');\n        const match = cleanValue.match(/([0-9]+)/);\n        if (match) result.stats.matches = parseInt(match[1]);\n      }\n    }\n  });\n  \n  // Fallback\n  if (!result.stats.winRate || !result.stats.pickRate) {\n    const labelCells = document.querySelectorAll('td.m-1wnuvga');\n    const valueCells = document.querySelectorAll('td.m-197vfit');\n    \n    labelCells.forEach((labelCell, index) => {\n      if (valueCells[index]) {\n        const label = labelCell.textContent || '';\n        const value = valueCells[index].textContent || '';\n        \n        if (label.toLowerCase().includes('win rate') && !result.stats.winRate) {\n          result.stats.winRate = extractNumber(value);\n        } else if (label.toLowerCase().includes('pick rate') && !result.stats.pickRate) {\n          result.stats.pickRate = extractNumber(value);\n        } else if (label.toLowerCase().includes('ban rate') && !result.stats.banRate) {\n          result.stats.banRate = extractNumber(value);\n        } else if (label.toLowerCase().includes('matches') && !result.stats.matches) {\n          const cleanValue = value.replace(/\\s/g, '').replace(/,/g, '');\n          const match = cleanValue.match(/([0-9]+)/);\n          if (match) result.stats.matches = parseInt(match[1]);\n        }\n      }\n    });\n  }\n  \n  // Extract matchups (limited to 6 each)\n  const weakSection = document.querySelector('div.m-19azwe2');\n  if (weakSection) {\n    weakSection.querySelectorAll('a[href*=\"/champions/\"]').forEach(champ => {\n      if (result.matchups.weakAgainst.length >= 6) return;\n      let name = champ.textContent?.trim() || '';\n      name = name.replace(/[0-9]+\\.?[0-9]*%.*$/g, '').trim();\n      name = name.replace(/Win Rate.*$/gi, '').trim();\n      \n      if (name && name.length > 1 && name.length < 30 && \n          !name.includes('Build') && !name.includes('Rune') && \n          /^[A-Za-z\\s\\'\\.]+$/.test(name) && \n          !result.matchups.weakAgainst.includes(name)) {\n        result.matchups.weakAgainst.push(name);\n      }\n    });\n  }\n  \n  const strongSection = document.querySelector('div.m-18t0flh');\n  if (strongSection) {\n    strongSection.querySelectorAll('a[href*=\"/champions/\"]').forEach(champ => {\n      if (result.matchups.strongAgainst.length >= 6) return;\n      let name = champ.textContent?.trim() || '';\n      name = name.replace(/[0-9]+\\.?[0-9]*%.*$/g, '').trim();\n      name = name.replace(/Win Rate.*$/gi, '').trim();\n      \n      if (name && name.length > 1 && name.length < 30 && \n          !name.includes('Build') && !name.includes('Rune') && \n          /^[A-Za-z\\s\\'\\.]+$/.test(name) && \n          !result.matchups.strongAgainst.includes(name)) {\n        result.matchups.strongAgainst.push(name);\n      }\n    });\n  }\n  \n  return result;\n}\n\n// ==================== Main Scraping Function ====================\nasync function scrapeWithRetry(item, config) {\n  const { championName, role } = item.json;\n  const identifier = `${championName} ${role}`;\n  let lastError;\n  \n  // DNS pre-resolution\n  await resolveDNS(identifier);\n  \n  // Retry logic\n  for (let attempt = 1; attempt <= config.maxRetries; attempt++) {\n    let browser;\n    \n    try {\n      console.log(`[${identifier}] Attempt ${attempt}/${config.maxRetries}`);\n      \n      // Reduced delay\n      if (attempt > 1) {\n        const delay = attempt * 1000; // Reduced from 2000\n        console.log(`[${identifier}] Retry in ${delay/1000}s...`);\n        await new Promise(resolve => setTimeout(resolve, delay));\n      } else {\n        await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced from 2000\n      }\n      \n      // Connect and setup\n      browser = await createBrowser(config, identifier);\n      const page = await setupPage(browser, item.json.mobalytics_url, config, identifier);\n      \n      // Extract data\n      const data = await page.evaluate(extractMobalyticsData);\n      await browser.close();\n      \n      // Validate\n      const hasValidData = data.stats.winRate !== null || \n                          data.stats.pickRate !== null || \n                          data.matchups.weakAgainst.length > 0 ||\n                          data.matchups.strongAgainst.length > 0;\n      \n      if (hasValidData) {\n        console.log(`✅ [${identifier}] WR ${data.stats.winRate}%, PR ${data.stats.pickRate}%`);\n        \n        return {\n          json: {\n            ...item.json,\n            mobalytics_data: data,\n            attempt: attempt,\n            success: true\n          }\n        };\n      }\n      \n      lastError = new Error('No valid data');\n      console.log(`⚠️ [${identifier}] No data, retrying...`);\n      \n    } catch (error) {\n      lastError = error;\n      const errorDetails = getErrorDetails(error);\n      console.log(`[ERROR] [${identifier}] ${errorDetails}`);\n      \n      if (browser) {\n        try { await browser.close(); } catch (e) {}\n      }\n    }\n  }\n  \n  // Failed\n  console.log(`❌ [${identifier}] Failed`);\n  return {\n    json: {\n      ...item.json,\n      mobalytics_data: {\n        stats: { winRate: null, pickRate: null, banRate: null, matches: null },\n        matchups: { weakAgainst: [], strongAgainst: [] }\n      },\n      error: getErrorDetails(lastError),\n      success: false\n    }\n  };\n}\n\n// ==================== Main Execution ====================\nconst startTime = Date.now();\nconst config = createConfig();\n\ntry {\n  const results = await Promise.all(\n    items.map(item => scrapeWithRetry(item, config))\n  );\n  \n  const duration = ((Date.now() - startTime) / 1000).toFixed(1);\n  const successCount = results.filter(r => r.json.success).length;\n  \n  console.log(`\\n📊 Mobalytics Summary: ${duration}s, ${successCount}/${results.length} success`);\n  \n  return results;\n  \n} catch (error) {\n  console.log('[ERROR] Fatal error:', getErrorDetails(error));\n  throw error;\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        32
+      ],
+      "id": "cc2bf61f-aa94-4aa2-afb8-c2f9d7fa1d5a",
+      "name": "Scrape Mobalytics Browser API"
+    },
+    {
+      "parameters": {
+        "url": "http://host.docker.internal:3000/api/knowledge/current-patch",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -880,
+        128
+      ],
+      "id": "5f03c5dd-94bb-4f14-b8bc-07eafc1da431",
+      "name": "Get Current Patch"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Store Match Statistics data in champion_builds table\n-- This query handles median statistics from OP.GG and Mobalytics\n-- Usage: Use in n8n PostgreSQL node with \"Execute Query\" operation\n-- Input: Array of champion data items from previous node\n\nWITH input_data AS (\n  SELECT \n    json_array_elements('{{ JSON.stringify($input.all()) }}'::json) AS item\n)\nINSERT INTO champion_builds (\n  champion_id, role, win_rate, pick_rate, ban_rate,\n  patch_version, source, tier, scraped_at\n)\nSELECT\n  LOWER((item->'json'->>'championId')::text),\n  UPPER((item->'json'->>'role')::text),\n  COALESCE((item->'json'->'combinedStats'->>'winRate')::numeric, 50.0),\n  COALESCE((item->'json'->'combinedStats'->>'pickRate')::numeric, 0.0),\n  COALESCE((item->'json'->'combinedStats'->>'banRate')::numeric, 0.0),\n  (item->'json'->>'patchVersion')::text,\n  'opgg_mobalytics',\n  'MASTER+',\n  CURRENT_TIMESTAMP\nFROM input_data\nWHERE item->'json'->>'championId' IS NOT NULL\n  AND item->'json'->>'role' IS NOT NULL\nON CONFLICT (champion_id, patch_version, role, source)\nDO UPDATE SET\n  win_rate = EXCLUDED.win_rate,\n  pick_rate = EXCLUDED.pick_rate,\n  ban_rate = EXCLUDED.ban_rate,\n  scraped_at = CURRENT_TIMESTAMP\nRETURNING champion_id, role, patch_version, win_rate, pick_rate;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        -80
+      ],
+      "id": "eb9f36be-5ca3-4a91-8fb4-008344ce7569",
+      "name": "Store in Champion Builds",
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Wait 1 second": {
+      "main": [
+        [
+          {
+            "node": "Process in Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Champion Stats": {
+      "main": [
+        [
+          {
+            "node": "Store in Champion Builds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Merged Data with Median": {
+      "main": [
+        [
+          {
+            "node": "Store Champion Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Scraping URLs": {
+      "main": [
+        [
+          {
+            "node": "Scrape OP.GG Browser API",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scrape Mobalytics Browser API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process in Batches": {
+      "main": [
+        [
+          {
+            "node": "Generate Scraping URLs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Completion Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Work Items (Filtered)": {
+      "main": [
+        [
+          {
+            "node": "Process in Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Champion by Role": {
+      "main": [
+        [
+          {
+            "node": "Prepare Work Items (Filtered)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Role URLs": {
+      "main": [
+        [
+          {
+            "node": "Scrape Champion by Role",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily at 3 AM": {
+      "main": [
+        [
+          {
+            "node": "Get Current Patch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape OP.GG Browser API": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources by Position",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Mobalytics Browser API": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources by Position",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Sources by Position": {
+      "main": [
+        [
+          {
+            "node": "Process Merged Data with Median",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Current Patch": {
+      "main": [
+        [
+          {
+            "node": "Prepare Role URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store in Champion Builds": {
+      "main": [
+        [
+          {
+            "node": "Wait 1 second",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "b9fcf0f8-54aa-45e1-9cb6-de145a075019",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "632105b63ad93b396ac21e2dcd244202b28fcdc6f71b8b1495bded7e462056e3"
+  },
+  "id": "7jzacrLsuANRx8lJ",
+  "tags": []
+}

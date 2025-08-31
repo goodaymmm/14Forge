@@ -1,0 +1,1366 @@
+{
+  "name": "14coacher",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "ed5ec382-d027-4c77-9fe0-9452ff0d2f4a",
+      "name": "AI Agent with Research",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -1584,
+        160
+      ],
+      "notes": "Re-analyze with additional research data"
+    },
+    {
+      "parameters": {},
+      "id": "d605f314-902a-4db2-b1ad-1a55d46ccc28",
+      "name": "Merge Research Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -464,
+        144
+      ],
+      "notes": "Combine original data with research results"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mergeノードからの入力を適切に処理\nconst items = $input.all();\n\n// AI Agent出力を探す（outputフィールドを持つアイテム）\nconst aiOutputItem = items.find(item => item.json.output);\nlet aiOutput = {};\n\n// AI Agent出力のパース\nif (aiOutputItem && aiOutputItem.json.output) {\n  const outputString = aiOutputItem.json.output;\n  // ```json ... ``` 形式のJSONを抽出\n  const jsonMatch = outputString.match(/```json\\n([\\s\\S]*?)\\n```/);\n  if (jsonMatch) {\n    try {\n      aiOutput = JSON.parse(jsonMatch[1]);\n    } catch (e) {\n      console.error('Failed to parse AI output JSON:', e);\n    }\n  }\n}\n\n// Build RAG Contextからのデータ（フォールバック用）\nconst contextItem = items.find(item => item.json.champion && item.json.role && !item.json.output);\nconst contextData = contextItem ? contextItem.json : {};\n\n// 必要なデータを動的に取得（優先順位: AI出力 → Context → デフォルト）\nconst champion = aiOutput.champion || contextData.champion || 'unknown';\nconst role = aiOutput.role || contextData.role || 'MIDDLE';\nconst patch = aiOutput.patch || contextData.patch || '15.14';\nconst nextTier = aiOutput.nextTier || contextData.nextTier || 'GOLD';\nconst currentTier = aiOutput.currentTier || contextData.currentTier || 'SILVER';\n\n// research_topicsを取得\nconst topics = aiOutput.research_topics || [];\n\n// matchContextを取得（AI出力またはcontextDataから）\nconst coachingContext = aiOutput.coachingContext || contextData.coachingContext || {};\nconst matchContext = coachingContext.matchContext || {};\nconst laneOpponent = matchContext.laneOpponent || 'Unknown';\n\n// デバッグ用にログ出力\nconsole.log('Champion:', champion);\nconsole.log('Role:', role);\nconsole.log('Patch:', patch);\nconsole.log('Next Tier:', nextTier);\nconsole.log('Lane Opponent:', laneOpponent);\nconsole.log('Topics:', topics);\n\n// ロールマッピング（LoLalytics用）\nconst roleMap = {\n  'TOP': 'top',\n  'JUNGLE': 'jungle',\n  'MIDDLE': 'middle',\n  'MID': 'middle',\n  'BOTTOM': 'bottom',\n  'ADC': 'bottom',\n  'UTILITY': 'support',\n  'SUPPORT': 'support'\n};\n\n// ティアマッピング（OP.GG用）\nconst tierMap = {\n  'IRON': 'iron',\n  'BRONZE': 'bronze',\n  'SILVER': 'silver',\n  'GOLD': 'gold',\n  'PLATINUM': 'platinum',\n  'EMERALD': 'emerald',\n  'DIAMOND': 'diamond',\n  'MASTER': 'master',\n  'GRANDMASTER': 'grandmaster',\n  'CHALLENGER': 'challenger'\n};\n\n// マッピングを使用して正規化\nconst normalizedRole = roleMap[role.toUpperCase()] || 'mid';\nconst normalizedTier = tierMap[nextTier.toUpperCase()] || 'gold';\n\n// トピックに基づいてスクレイピングURLとセレクターを生成\nconst scrapingTargets = [];\nconst addedUrls = new Set(); // URL重複防止用\n\ntopics.forEach(topic => {\n  // ジャングル関連トピックのフィルタリング（プレイヤーがジャングラーでない場合はスキップ）\n  if (role !== 'JUNGLE' && (topic.includes('クリア速度') || topic.includes('clear speed') || topic.includes('ジャングル') || topic.includes('JG'))) {\n    console.log(`Skipping jungle topic for non-jungle role: ${role}`);\n    return; // このトピックをスキップ\n  }\n\n  if (topic.includes('マッチアップ') || topic.includes('matchup') || topic.includes('対面')) {\n    // LoLalyticsの対面分析URL\n    if (laneOpponent && laneOpponent !== 'Unknown') {\n      // 複数対面の場合の処理を改善\n      const opponents = laneOpponent.split(' & ').map(s => s.trim());\n      let actualOpponent = '';\n      \n      // ロールに応じて適切な対面を選択\n      if (role === 'UTILITY' || role === 'SUPPORT') {\n        // サポートの場合は2番目（対面サポート）を優先\n        actualOpponent = opponents[1] || opponents[0];\n      } else if (role === 'BOTTOM' || role === 'ADC') {\n        // ADCの場合は2番目（対面サポート）を使用することもある\n        actualOpponent = opponents[1] || opponents[0];\n      } else {\n        // その他のロールは最初の対面を使用\n        actualOpponent = opponents[0];\n      }\n      \n      const matchupUrl = `https://lolalytics.com/lol/${champion.toLowerCase()}/vs/${actualOpponent.toLowerCase()}/build/?lane=${normalizedRole}&tier=${normalizedTier}&vslane=${normalizedRole}&patch=${patch}`;\n      \n      if (!addedUrls.has(matchupUrl)) {\n        addedUrls.add(matchupUrl);\n        scrapingTargets.push({\n          url: matchupUrl,\n          type: 'matchup_data',\n          description: `${champion} vs ${actualOpponent} matchup data`,\n          originalData: aiOutput\n        });\n      }\n    } else {\n      // 対面不明の場合は一般的なカウンター情報\n      const counterUrl = `https://lolalytics.com/lol/${champion.toLowerCase()}/build/?lane=${normalizedRole}&tier=${normalizedTier}&patch=${patch}`;\n      \n      if (!addedUrls.has(counterUrl)) {\n        addedUrls.add(counterUrl);\n        scrapingTargets.push({\n          url: counterUrl,\n          type: 'matchup_data',\n          description: `${champion} counter data`,\n          originalData: aiOutput\n        });\n      }\n    }\n  }\n\n  if (topic.includes('ルーン') || topic.includes('rune') || topic.includes('キーストーン')) {\n    const runeUrl = `https://lolalytics.com/lol/${champion.toLowerCase()}/build/?lane=${normalizedRole}&tier=${normalizedTier}&patch=${patch}`;\n    \n    if (!addedUrls.has(runeUrl)) {\n      addedUrls.add(runeUrl);\n      scrapingTargets.push({\n        url: runeUrl,\n        type: 'rune_data',\n        description: `${champion} rune statistics for ${role}`,\n        originalData: aiOutput\n      });\n    }\n  }\n\n  if (topic.includes('ダメージトレード') || topic.includes('damage trade') || topic.includes('統計')) {\n    const statsUrl = `https://lolalytics.com/lol/${champion.toLowerCase()}/build/?lane=${normalizedRole}&tier=${normalizedTier}&patch=${patch}`;\n    \n    if (!addedUrls.has(statsUrl)) {\n      addedUrls.add(statsUrl);\n      scrapingTargets.push({\n        url: statsUrl,\n        type: 'statistics_data',\n        description: 'Champion statistics and damage data',\n        originalData: aiOutput\n      });\n    }\n  }\n});\n\n// スクレイピングターゲットがない場合はデフォルトを追加\nif (scrapingTargets.length === 0) {\n  scrapingTargets.push({\n    url: `https://lolalytics.com/lol/${champion.toLowerCase()}/build/?lane=${normalizedRole}&tier=${normalizedTier}&patch=${patch}`,\n    type: 'general_stats',\n    description: 'General champion statistics',\n    originalData: aiOutput\n  });\n}\n\n// 単一のオブジェクトとして全URLを含めて返す（ナンバリング付き）\nconst result = {\n  originalData: aiOutput\n};\n\n// 各URLをナンバリング付きフィールドとして追加\nscrapingTargets.forEach((target, index) => {\n  const num = index + 1;\n  result[`url${num}`] = target.url;\n  result[`type${num}`] = target.type;\n  result[`description${num}`] = target.description;\n});\n\n// URLの総数を追加（BrightDataノードで処理しやすくするため）\nresult.urlCount = scrapingTargets.length;\n\n// デバッグ用にURL一覧も含める\nresult.urls = scrapingTargets.map(t => t.url);\nresult.types = scrapingTargets.map(t => t.type);\n\nconsole.log(`Generated ${scrapingTargets.length} URLs for scraping`);\n\n// 単一のアイテムとして返す\nreturn [{\n  json: result\n}];"
+      },
+      "id": "d9c32711-5a99-489c-98d4-29a621e71a71",
+      "name": "Format BrightData Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -944,
+        -224
+      ],
+      "notes": "Convert research topics to BrightData scraping targets"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "research-check",
+              "leftValue": "={{ $json.need_additional_research === true || $json.need_additional_research === 'true' }} ",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3a716a28-bea9-485a-8b57-6fc5efed26d1",
+      "name": "Check Research Flag",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        -464
+      ],
+      "notes": "Check if AI needs additional research data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate LoLalytics URLs - NO HARDCODED VALUES\nconst data = $('Extract Data').item.json;\nconst { champion, currentTier, nextTier, server, role, patch } = data;\n\n// パッチが送られてこない場合はエラー\nif (!patch) {\n  throw new Error('Patch number is required from backend. Please ensure backend sends patch information.');\n}\n\n// LoLalyticsのtier表記\nconst tierMap = {\n  'IRON': 'iron',\n  'BRONZE': 'bronze',\n  'SILVER': 'silver',\n  'GOLD': 'gold',\n  'PLATINUM': 'platinum',\n  'EMERALD': 'emerald',\n  'DIAMOND': 'diamond',\n  'MASTER': 'master',\n  'GRANDMASTER': 'grandmaster',\n  'CHALLENGER': 'challenger'\n};\n\n// LoLalyticsのregion表記 - Riot API形式にも対応\nconst regionMap = {\n  // Riot API形式（大文字+数字）\n  'JP1': 'jp',\n  'KR': 'kr',\n  'NA1': 'na',\n  'EUW1': 'euw',\n  'EUN1': 'eune',\n  'OC1': 'oce',\n  'BR1': 'br',\n  'LA1': 'lan',\n  'LA2': 'las',\n  'RU': 'ru',\n  'TR1': 'tr',\n  // 小文字+数字形式\n  'jp1': 'jp',\n  'kr1': 'kr',\n  'na1': 'na',\n  'euw1': 'euw',\n  'eun1': 'eune',\n  'oc1': 'oce',\n  'br1': 'br',\n  'la1': 'lan',\n  'la2': 'las',\n  'ru1': 'ru',\n  'tr1': 'tr',\n  // 既存の小文字形式も維持\n  'jp': 'jp',\n  'kr': 'kr',\n  'na': 'na',\n  'euw': 'euw',\n  'eune': 'eune',\n  'oce': 'oce',\n  'br': 'br',\n  'lan': 'lan',\n  'las': 'las',\n  'ru': 'ru',\n  'tr': 'tr'\n};\n\nconsole.log(`Using patch ${patch} from backend`);\n\n// サーバー名を正規化してマッピング\nconst normalizedServer = server.toUpperCase();\nconst lolaRegion = regionMap[normalizedServer] || regionMap[server.toLowerCase()] || regionMap[server] || 'kr';\n\nconsole.log(`Mapping server ${server} to LoLalytics region: ${lolaRegion}`);\n\nconst urls = [\n  {\n    url: `https://lolalytics.com/lol/${champion.toLowerCase()}/build/?tier=${tierMap[currentTier] || 'gold'}&region=${lolaRegion}&patch=${patch}`,\n    tier: currentTier,\n    type: 'current',\n    source: 'lolalytics',\n    patch: patch\n  },\n  {\n    url: `https://lolalytics.com/lol/${champion.toLowerCase()}/build/?tier=${tierMap[nextTier] || tierMap[currentTier] || 'gold'}&region=${lolaRegion}&patch=${patch}`,\n    tier: nextTier,\n    type: 'next',\n    source: 'lolalytics',\n    patch: patch\n  }\n];\n\nreturn urls.map(item => ({\n  json: {\n    ...item,\n    champion,\n    role,\n    server\n  }\n}));"
+      },
+      "id": "c4a2877b-7ceb-40f6-8fb8-67324350a2b0",
+      "name": "Generate LoLalytics URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3280,
+        -480
+      ]
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -1968,
+        -32
+      ],
+      "id": "81df9c4e-05ec-4a45-b87b-f244e2194e66",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.cache_key }}",
+        "contextWindowLength": 10
+      },
+      "id": "0a8b89a7-92e8-438c-b7d2-a26d2070613c",
+      "name": "Postgres Chat Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.1,
+      "position": [
+        -1488,
+        -176
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        -1584,
+        -160
+      ],
+      "id": "e751c8f4-ffd2-4a1c-97c1-f74f9f9e31e1",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "lC6K0eYVSW2JwhLs",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n  // Return cached result\n  const cachedData = $json.analysis_result;\n\n  // AIの応答がJSON文字列の場合はパース\n  let parsedData = cachedData;\n  if (typeof cachedData === 'string') {\n    try {\n      // JSON文字列が\"```json\"で始まる場合の処理\n      let cleanJson = cachedData;\n      if (cachedData.includes('```json')) {\n        cleanJson = cachedData.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n      }\n      parsedData = JSON.parse(cleanJson);\n    } catch (e) {\n      // パースできない場合はそのまま返す\n      parsedData = { output: cachedData };\n    }\n  }\n\n  return {\n    json: {\n      success: true,\n      cached: true,\n      analysis_result: parsedData,\n      // フロントエンドが期待する形式に合わせる\n      coaching: parsedData\n    }\n  };"
+      },
+      "id": "757746af-ad77-4593-91dd-f5f086f02884",
+      "name": "Return Cached",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3280,
+        -640
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "02b20aa2-9c4c-4daa-b61b-405616f78ca6",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        352,
+        -640
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ai_analysis_cache (cache_key, analysis_result, expires_at, created_at, updated_at)\nVALUES (\n  '{{ $('Fix Context').item.json.cache_key }}',\n  to_jsonb($JSON${{ $json.full_output || $json.output }}$JSON$::text),\n  NOW() + INTERVAL '6 hours',\n  NOW(),\n  NOW()\n)\nON CONFLICT (cache_key) \nDO UPDATE SET \n  analysis_result = EXCLUDED.analysis_result,\n  expires_at = EXCLUDED.expires_at,\n  updated_at = NOW()\nRETURNING cache_key, analysis_result, expires_at",
+        "options": {}
+      },
+      "id": "9413bcad-8a77-4adc-be44-6c9ce2d4b63b",
+      "name": "Store Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -224,
+        -480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "9925ce37-0b96-46f0-8beb-5c4bfd9ecd7e",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -1392,
+        -464
+      ],
+      "notes": "AI Agent using League of Graphs data from BrightData for tier progression coaching"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build comprehensive RAG context from all data sources\nconst items = $input.all();\n\n// Find LoLalytics data for current and next tier\nconst currentTierData = items.find(item => item.json.tierType === 'current') || {};\nconst nextTierData = items.find(item => item.json.tierType === 'next') || {};\n\n// Find database data\nconst metaData = items.filter(item => item.json.champion_name) || [];\nconst fourteenMinData = items.find(item => item.json.match_id) || {};\n\n// Extract Dataノードから必要なデータを取得（動的に）\nconst extractDataNode = $('Extract Data').first();\n\nif (!extractDataNode.json) {\n  throw new Error('Extract Data node output is required. Please ensure the workflow is properly configured.');\n}\n\n// Extract baseData - Extract Dataノードから取得（ハードコード・デフォルト値なし）\nconst baseData = {\n  summonerName: extractDataNode.json.summonerName,\n  champion: extractDataNode.json.champion || currentTierData.json?.champion,\n  role: extractDataNode.json.role || currentTierData.json?.role,\n  currentTier: extractDataNode.json.currentTier || currentTierData.json?.tier,\n  nextTier: extractDataNode.json.nextTier || nextTierData.json?.tier,\n  division: extractDataNode.json.division,\n  language: extractDataNode.json.language,\n  locale: extractDataNode.json.locale,\n  matchId: extractDataNode.json.matchId || fourteenMinData.json?.match_id,\n  cache_key: extractDataNode.json.cache_key\n};\n\n// 必須フィールドの検証（デフォルト値なし）\nif (!baseData.summonerName) {\n  throw new Error('summonerName is required from Extract Data node');\n}\nif (!baseData.matchId) {\n  throw new Error('matchId is required from Extract Data node');\n}\nif (!baseData.champion) {\n  throw new Error('champion is required from Extract Data node');\n}\nif (!baseData.role) {\n  throw new Error('role is required from Extract Data node');\n}\nif (!baseData.cache_key) {\n  // cache_keyのみ動的生成を許可\n  baseData.cache_key = `14coacher_${baseData.summonerName}_${baseData.matchId}`;\n}\n\n// Extract player-specific data from 14-min analysis\nlet playerAnalysis = {};\nif (fourteenMinData.json?.participants) {\n  // Find the target player - championNameを優先\n  const targetPlayer = fourteenMinData.json.participants.find(\n    p => p.championName === baseData.champion\n  ) || fourteenMinData.json.participants.find(\n    p => p.individualPosition === baseData.role\n  );\n  \n  if (targetPlayer) {\n    playerAnalysis = {\n      cs_at_14: targetPlayer.cs,\n      gold_at_14: targetPlayer.totalGold,\n      level_at_14: targetPlayer.level,\n      csEfficiency: targetPlayer.csEfficiency,\n      goldPerMinute: Math.round(targetPlayer.goldPerMinute * 10) / 10, // 小数点第1位まで\n      wardsPlaced: targetPlayer.wardsPlaced,\n      killParticipation: targetPlayer.killParticipation,\n      objectiveParticipation: targetPlayer.objectiveParticipation || 0,\n      teamId: targetPlayer.teamId // チームIDを保持\n    };\n  }\n}\n\n// Extract team compositions from match data\nlet allyTeam = [];\nlet enemyTeam = [];\nlet laneOpponent = 'Unknown';\n\nif (fourteenMinData.json?.participants && playerAnalysis.teamId) {\n  const allParticipants = fourteenMinData.json.participants;\n  \n  // Get ally and enemy teams\n  allyTeam = allParticipants\n    .filter(p => p.teamId === playerAnalysis.teamId)\n    .map(p => ({\n      champion: p.championName,\n      role: p.individualPosition || p.teamPosition\n    }));\n  \n  enemyTeam = allParticipants\n    .filter(p => p.teamId !== playerAnalysis.teamId)\n    .map(p => ({\n      champion: p.championName,\n      role: p.individualPosition || p.teamPosition\n    }));\n  \n  // Find lane opponent for Support/ADC\n  if (baseData.role === 'UTILITY' || baseData.role === 'SUPPORT') {\n    const enemyBot = enemyTeam.filter(p => p.role === 'BOTTOM' || p.role === 'UTILITY');\n    laneOpponent = enemyBot.map(p => p.champion).join(' & ') || 'Unknown';\n  } else if (baseData.role === 'BOTTOM') {\n    const enemyBot = enemyTeam.filter(p => p.role === 'BOTTOM' || p.role === 'UTILITY');\n    laneOpponent = enemyBot.map(p => p.champion).join(' & ') || 'Unknown';\n  } else {\n    const enemyLaner = enemyTeam.find(p => p.role === baseData.role);\n    laneOpponent = enemyLaner?.champion || 'Unknown';\n  }\n}\n\n// Build simplified context for AI Agent\nconst context = {\n  player: {\n    summonerName: baseData.summonerName,\n    currentTier: baseData.currentTier,\n    nextTier: baseData.nextTier,\n    division: baseData.division,\n    champion: baseData.champion,\n    role: baseData.role,\n    language: baseData.language\n  },\n  matchContext: {\n    allyTeam: allyTeam.map(p => p.champion).join(', ') || 'Unknown',\n    enemyTeam: enemyTeam.map(p => p.champion).join(', ') || 'Unknown',\n    laneOpponent: laneOpponent\n  },\n  currentTierMeta: {\n    items: currentTierData.json?.items?.slice(0, 6).map(i => i.name) || [],\n    keystone: currentTierData.json?.runes?.[0]?.name || 'Unknown',\n    secondaryRune: currentTierData.json?.runes?.[4]?.name || 'Unknown',\n    winRate: currentTierData.json?.stats?.winRate || 'N/A',\n    pickRate: currentTierData.json?.stats?.pickRate || 'N/A'\n  },\n  nextTierMeta: {\n    items: nextTierData.json?.items?.slice(0, 6).map(i => i.name) || [],\n    keystone: nextTierData.json?.runes?.[0]?.name || 'Unknown',\n    winRate: nextTierData.json?.stats?.winRate || 'N/A'\n  },\n  gameAnalysis: {\n    ...playerAnalysis,\n    // チーム100視点のgoldDiffをプレイヤーのチーム視点に変換\n    teamGoldDiff: playerAnalysis.teamId === 200 ? \n      -(fourteenMinData.json?.gold_diff || 0) : // 赤チーム(200)なら符号反転\n      (fourteenMinData.json?.gold_diff || 0),   // 青チーム(100)ならそのまま\n    // winPredictionもチーム視点で調整\n    winPrediction: playerAnalysis.teamId === 200 ? \n      100 - parseFloat(fourteenMinData.json?.win_prediction || 50) : // 赤チームなら100から引く\n      parseFloat(fourteenMinData.json?.win_prediction || 50),        // 青チームならそのまま\n    gameOutcome: playerAnalysis.teamId && fourteenMinData.json?.actual_winner === playerAnalysis.teamId ? 'win' : 'loss'\n  },\n  insights: fourteenMinData.json?.insights?.filter(i => \n    i.championName === baseData.champion || i.type === 'goldLead'\n  ) || []\n};\n\n// Extract Dataノードからベンチマークと実際のパフォーマンスを取得\nconst benchmarks = extractDataNode.json?.benchmarks || {};\nconst actualPerformance = extractDataNode.json?.actual_performance || {};\n\n// 必要な変数を定義\nconst summonerName = baseData.summonerName;\nconst champion = baseData.champion;\nconst patch = extractDataNode.json?.patch;\nif (!patch) {\n  throw new Error('patch is required from Extract Data node');\n}\nconst language = baseData.language;\n\n// 高レート（Diamond+）のベンチマークスコア - フロントエンドと完全一致\nconst highRateBenchmark = {\n  TOP: { cs_14: 119, gold_14: 5200, level_14: 9 },\n  JUNGLE: { cs_14: 88, gold_14: 4800, level_14: 8 },\n  MIDDLE: { cs_14: 133, gold_14: 5400, level_14: 9 },\n  BOTTOM: { cs_14: 133, gold_14: 5500, level_14: 9 },\n  UTILITY: { cs_14: 24, gold_14: 3800, level_14: 8 },\n  SUPPORT: { cs_14: 24, gold_14: 3800, level_14: 8 }\n};\n\n// Generate champion-specific analysis prompt with meta requirements\nlet championPrompt = '';\nconst roleOriginal = baseData.role; // 元の値を保持（UTILITY, SUPPORT等の判定用）\nif (language === 'japanese') {\n  championPrompt = `\n【重要】必ず最新のパッチ${patch}の情報を基に分析してください。\n\n分析項目：\n1. ${champion}のパッチ${patch}での変更点、強み・弱み、パワースパイクタイミング\n2. ${roleOriginal}ポジションでの${champion}固有のコンボ、スキル回しとメカニクス\n3. ${champion}の最適なワードポジションとローミングタイミング\n   ${roleOriginal === 'BOTTOM' ? '4. サポートとのシナジーとレーン管理方法' : ''}\n   ${roleOriginal === 'UTILITY' ? '4. ADCとのシナジーとレーン管理方法' : ''}\n5. 高レート（Diamond+）のベンチマーク達成への段階的改善方法\n\n【メタ要件】\n- 現在のパッチ${patch}における${champion}のティア評価とその理由\n- 推奨ルーン（キーストーン、サブルーン）と勝率\n- コアビルドパスと状況別アイテム選択\n- 強い/弱い対面チャンピオンとその対策`;\n} else if (language === 'korean') {\n  championPrompt = `\n【중요】반드시 최신 패치 ${patch}의 정보를 바탕으로 분석해주세요.\n\n분석 항목:\n1. ${champion}의 패치 ${patch}에서의 변경점, 강점・약점, 파워 스파이크 타이밍\n2. ${roleOriginal} 포지션에서의 ${champion} 고유 콤보, 스킬 사용법과 메커니즘\n3. ${champion}의 최적 와드 위치와 로밍 타이밍\n   ${roleOriginal === 'BOTTOM' ? '4. 서포터와의 시너지와 라인 관리 방법' : ''}\n   ${roleOriginal === 'UTILITY' ? '4. ADC와의 시너지와 라인 관리 방법' : ''}\n5. 고랭크(다이아몬드+) 벤치마크 달성을 위한 단계별 개선 방법\n\n【메타 요구사항】\n- 현재 패치 ${patch}에서 ${champion}의 티어 평가와 이유\n- 추천 룬(키스톤, 서브룬)과 승률\n- 코어 빌드 경로와 상황별 아이템 선택\n- 강한/약한 상대 챔피언과 대응 방법`;\n} else {\n  championPrompt = `\n【IMPORTANT】Analyze based on the latest patch ${patch} information.\n\nAnalysis items:\n1. ${champion}'s patch ${patch} changes, strengths/weaknesses, power spike timings\n2. ${roleOriginal} position-specific ${champion} combos, skill rotations and mechanics\n3. ${champion}'s optimal ward positions and roaming timings\n   ${roleOriginal === 'BOTTOM' ? '4. Synergy with support and lane management methods' : ''}\n   ${roleOriginal === 'UTILITY' ? '4. Synergy with ADC and lane management methods' : ''}\n5. Step-by-step improvement methods to achieve high-rank (Diamond+) benchmarks\n\n【Meta Requirements】\n- ${champion}'s tier rating in current patch ${patch} and reasoning\n- Recommended runes (keystone, secondary) and win rates\n- Core build path and situational item choices\n- Strong/weak matchups and counter strategies`;\n}\n\n// ランクに応じた目標係数\nconst tierCoefficients = {\n  IRON: 0.4,      // 高レートの40%を目標\n  BRONZE: 0.5,    // 50%\n  SILVER: 0.6,    // 60%\n  GOLD: 0.7,      // 70%\n  PLATINUM: 0.8,  // 80%\n  EMERALD: 0.85,  // 85%\n  DIAMOND: 0.9,   // 90%\n  MASTER: 0.95,   // 95%\n  GRANDMASTER: 1.0,  // 100%\n  CHALLENGER: 1.05   // 105%\n};\n\n// 役割とティアに基づいてベンチマークと推奨事項を計算\nconst role = baseData.role?.toUpperCase() || 'MIDDLE';\nconst currentTier = baseData.currentTier?.toUpperCase() || 'SILVER';\nconst coefficient = tierCoefficients[currentTier] || 0.6;\n\n// ベンチマーク値の計算\nconst benchmarkRole = highRateBenchmark[role] || highRateBenchmark.MIDDLE;\nconst csGoal = Math.round(benchmarkRole.cs_14 * coefficient);\nconst goldGoal = Math.round(benchmarkRole.gold_14 * coefficient);\n\n// 実際のパフォーマンスデータ\nconst actualCs = context.gameAnalysis.cs_at_14 || actualPerformance.cs_at_14 || 0;\nconst actualGold = context.gameAnalysis.gold_at_14 || actualPerformance.gold_at_14 || 0;\nconst actualWards = context.gameAnalysis.wardsPlaced || 0;\n\n// 言語別プロンプトを生成（chatInput用）\nconst promptTemplates = {\n  japanese: `あなたはLoLのプロコーチです。最新パッチ${patch}における${champion}（${roleOriginal}）の詳細な分析を行ってください。\n\n${championPrompt}\n\n## 試合コンテキスト\n- 味方チーム: ${context.matchContext.allyTeam}\n- 敵チーム: ${context.matchContext.enemyTeam}\n- レーン対面: ${context.matchContext.laneOpponent}\n\n## 分析項目\n1. ${champion}のパッチ${patch}での最新メタ（ルーン、ビルド、プレイスタイル）\n2. 対面${context.matchContext.laneOpponent}とのマッチアップ詳細\n${role === 'JUNGLE' ? \n  `3. 具体的なジャングルパス（例: Red→Krugs→Raptors→Wolves→Blue→Gromp by 3:30）\n   4. 敵ジャングラーを考慮したスカトル優先度とGankタイミング（3:15, 5:00, 7:30等）` : \nrole === 'UTILITY' || role === 'SUPPORT' ?\n  `3. 具体的なワード位置（例: 1:30リバーブッシュ、3:15ドラゴンピット入口、5:00トライブッシュ）\n   4. 味方ADCとの具体的なレーンコンボ（例: LuluのE→Q→ADCのオールイン）` :\n  `3. 対面${context.matchContext.laneOpponent}に対する具体的なウェーブ管理\n   4. レベル2,3,6のパワースパイクでの具体的なトレード方法`}\n\n## 具体的な時間指定アクション（${role}）\n${role === 'UTILITY' || role === 'SUPPORT' ?\n  `- 1:30: リバーブッシュへの最初のワード\n- 3:15: ドラゴン前の視界確保開始\n- 5:00-6:00: 最初のリコール（コントロールワード購入必須）\n- 8:00: サポートアイテムクエスト完了目標\n- 10:00-14:00: オブジェクト周辺の視界制圧` :\nrole === 'JUNGLE' ?\n  `- 1:30: リーシュ開始（Red/Blue）\n- 3:15-3:30: 最初のフルクリア完了\n- 3:30-4:00: スカトルコンテストまたは最初のGank\n- 5:00: 最初のリコール\n- 6:00-14:00: ドラゴン/ヘラルドコントロール` :\n  `- 1:30-3:00: レベル2先行を狙う\n- 3:00-5:00: レベル3でのトレード優位確立\n- 5:00-6:00: 最初のリコールタイミング\n- 6:00-10:00: レベル6パワースパイク活用\n- 10:00-14:00: サイドレーンプレッシャーまたはグループ`}\n\n${summonerName}選手の14分時点のパフォーマンス：\n## ベンチマークデータ（${currentTier}ランクの目標値）\n- 目標CS@14分: ${csGoal}\n- 目標ゴールド@14分: ${goldGoal}\n- 高レートCS@14分: ${benchmarkRole.cs_14}\n- 高レートゴールド@14分: ${benchmarkRole.gold_14}\n\n## 実際のパフォーマンス\n- CS@14分: ${actualCs}\n- ゴールド@14分: ${actualGold}\n- CS効率: ${context.gameAnalysis.csEfficiency || actualPerformance.cs_efficiency || 0}%\n- キル関与率: ${context.gameAnalysis.killParticipation || 0}%\n- ワード設置数: ${actualWards}\n\n【コーチング要件】\n- APMに関する言及は避けること（実装されていない機能）\n- 具体的な時間（分:秒）でアクションを指定すること\n- 具体的な場所（ドラゴンピット入口、トライブッシュ等）を明示すること\n- 対面マッチアップを考慮した具体的な対策を提示すること\n- ルーン選択は対面${context.matchContext.laneOpponent}との相性を考慮し、根拠を明確に説明\n- キル関与率の改善は、具体的な場面（例：3:15の敵JGフルクリア後のガンク対応）で指示\n- 「必ず」「絶対」などの断定的表現を避け、状況に応じた柔軟な表現を使用\n- コントロールワード購入は「1-2個を推奨」など柔軟な表現を使用\n${actualGold > goldGoal ? \n  `- 現在のゴールド${actualGold}は既に目標${goldGoal}を超えています。次の段階（高レート目標${benchmarkRole.gold_14}）への改善点を提示してください` :\n  `- 現在のゴールド${actualGold}から目標${goldGoal}への具体的な改善方法を提示してください`}\n\n【達成度チェック】\n- 8分時点: サポートアイテムクエスト完了状況を評価\n- 14分時点: ワード設置数${actualWards}個は${actualWards >= 8 ? '良好' : '改善の余地あり'}\n- キル関与率${context.gameAnalysis.killParticipation}%: ${context.gameAnalysis.killParticipation === 0 ? '具体的な改善場面を提示' : '現状を評価'}\n\n【対面分析】\n- 対面: ${context.matchContext.laneOpponent}\n- この対面に対する具体的な戦術とルーン選択の根拠を提示\n- 3:15（敵JGフルクリア後）のガンク対応方法を明示\n\n【追加調査判定基準 - 強化版】\n以下の場合、need_additional_research: true を設定し、research_topicsに含める：\n- 対面${context.matchContext.laneOpponent}との特定マッチアップ勝率データ\n- 敵JG（Tryndamere等）vs 味方JG（Trundle等）のフルクリア速度比較\n- ${champion} vs ${context.matchContext.laneOpponent}でのルーン別勝率\n- 14分時点でのダメージトレード統計（キル関与率0%の場合）\n\n【時間帯別スキル/レベル想定】\n- 1:30: レベル1（Q or E）\n- 3:15-3:30: レベル3-4（Q,W,E取得、R未取得）\n- 6:00: レベル5-6（R取得直前または直後）\n- 8:00: レベル7-8（R取得済み）\n- 14:00: レベル8-9\n\n【経済的現実性】\n- 8分時点のサポート想定ゴールド: 1200-1500\n- サポートアイテム1段階完成後: トリンケットをオラクルレンズに変更推奨\n\n【レーン管理】\n- 3:15前: ウェーブをスローブッシュして味方JGの位置に合わせる\n- ガンク時: ウェーブを押し込まれた状態でフリーズ\n- ローム時: キャノンウェーブをプッシュしてからローム\n\n必ず以下のJSON形式のみで回答（説明文なし）:\n{\n  \"need_additional_research\": false,\n  \"research_topics\": [],\n  \"champion\": \"${champion}\",\n  \"role\": \"${roleOriginal}\",\n  \"patch\": \"${patch}\",\n  \"currentTier\": \"${currentTier}\",\n  \"nextTier\": \"${baseData.nextTier}\",\n  \"analysis\": {\n    \"cs_efficiency\": ${context.gameAnalysis.csEfficiency || Math.round((actualCs / csGoal) * 100)},\n    \"gold_efficiency\": ${Math.round((actualGold / goldGoal) * 100)},\n    \"itemization_score\": 75,\n    \"macro_play_rating\": ${Math.min(100, Math.max(0, \n      (context.gameAnalysis.killParticipation || 0) * 3 + \n      actualWards * 4 + \n      (context.gameAnalysis.objectiveParticipation || 0) * 3))}\n  },\n  \"recommendations\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ? \n      `\"【8分目標】サポートアイテムクエスト完了とオラクルレンズへの変更 - ${actualGold >= 500 ? '順調、トリンケット変更を' : 'ポークでスタック獲得'}\",\n       \"【ダメージトレード評価】キル関与率${context.gameAnalysis.killParticipation}% - ${context.gameAnalysis.killParticipation === 0 ? '14分時点で0キルは一般的。重要なのはハラス頻度とトレード量' : '継続的にプレッシャー維持'}\",\n       \"【対面特化戦術】${context.matchContext.laneOpponent}対面での${champion}のルーン選択は、対面データ次第で調整が必要\"` :\n    role === 'JUNGLE' ?\n      `\"ジャングルCSを${csGoal}まで改善（現在${actualCs}） - 効率的なクリアパスが重要\",\n       \"${champion}のパッチ${patch}での最適なジャングルルート（Blue/Red開始）を実践\",\n       \"Gankとファームのバランスを改善 - レーナーのウェーブ状況を見極めてGank\"` :\n      `\"CSを${csGoal}まで改善（現在${actualCs}） - 10CS/分を意識したラストヒット\",\n       \"${champion}のパッチ${patch}でのウェーブコントロール技術を習得\",\n       \"レーン管理の改善 - スローブッシュ、フリーズ、ファストプッシュの使い分け\"`}\n  ],\n  \"priority_actions\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ?\n      `\"【ルーン選択】${context.matchContext.laneOpponent}対面の統計データに基づいて選択（追加調査推奨）\",\n       \"【3:15-3:30】レベル3-4想定、Q+W+Eでのトレード。Rは未取得なので位置取りで安全確保\",\n       \"【8分目標】約1200-1500ゴールド想定、サポートアイテム完成後はオラクルレンズに変更\"` :\n    role === 'JUNGLE' ?\n      `\"最初のフルクリアを3:30までに完了\",\n       \"スカトルクラブの優先度を理解し、適切なタイミングで確保\",\n       \"14分までに${goldGoal}ゴールド獲得を目標\"` :\n      `\"最初の3ウェーブで最大18CS中17CS以上を獲得\",\n       \"14分までに${goldGoal}ゴールド獲得を目標\",\n       \"キャノンミニオンを100%確実に獲得（105ゴールドの価値）\"`}\n  ],\n  \"benchmark_comparison\": {\n    \"vs_average\": ${Math.round(Math.max(-100, Math.min(100, ((actualCs / csGoal - 1) * 100))))},\n    \"vs_high_rank\": ${Math.round(Math.max(-100, Math.min(100, ((actualGold / benchmarkRole.gold_14 - 1) * 100))))}\n  }\n}`,\n\n  korean: `당신은 LoL 프로 코치입니다. 최신 패치 ${patch}에서 ${champion} (${roleOriginal})을 상세히 분석해주세요.\n\n${championPrompt}\n\n## 게임 컨텍스트\n- 아군 팀: ${context.matchContext.allyTeam}\n- 적 팀: ${context.matchContext.enemyTeam}\n- 라인 상대: ${context.matchContext.laneOpponent}\n\n## 분석 항목\n1. ${champion}의 패치 ${patch} 최신 메타 (룬, 빌드, 플레이스타일)\n2. 상대 ${context.matchContext.laneOpponent}와의 매치업 상세\n${role === 'JUNGLE' ? \n  `3. 구체적인 정글 패스 (예: 레드→돌거북→칼날부리→늑대→블루→두꺼비 3:30까지)\n   4. 적 정글러를 고려한 바위게 우선순위와 갱킹 타이밍 (3:15, 5:00, 7:30 등)` : \nrole === 'UTILITY' || role === 'SUPPORT' ?\n  `3. 구체적인 와드 위치 (예: 1:30 리버 부시, 3:15 드래곤 입구, 5:00 트라이부시)\n   4. 아군 ADC와의 구체적인 라인 콤보 (예: 룰루 E→Q→ADC 올인)` :\n  `3. 상대 ${context.matchContext.laneOpponent}에 대한 구체적인 웨이브 관리\n   4. 레벨 2,3,6 파워스파이크에서의 구체적인 트레이드 방법`}\n\n## 구체적인 시간별 액션 (${role})\n${role === 'UTILITY' || role === 'SUPPORT' ?\n  `- 1:30: 리버 부시 첫 와드\n- 3:15: 드래곤 전 시야 확보 시작\n- 5:00-6:00: 첫 리콜 (제어 와드 구매 필수)\n- 8:00: 서포트 아이템 퀘스트 완료 목표\n- 10:00-14:00: 오브젝트 주변 시야 제압` :\nrole === 'JUNGLE' ?\n  `- 1:30: 리쉬 시작 (레드/블루)\n- 3:15-3:30: 첫 풀클리어 완료\n- 3:30-4:00: 바위게 경쟁 또는 첫 갱킹\n- 5:00: 첫 리콜\n- 6:00-14:00: 드래곤/헤럴드 컨트롤` :\n  `- 1:30-3:00: 레벨 2 선점 노리기\n- 3:00-5:00: 레벨 3 트레이드 우위 확립\n- 5:00-6:00: 첫 리콜 타이밍\n- 6:00-10:00: 레벨 6 파워스파이크 활용\n- 10:00-14:00: 사이드레인 압박 또는 그룹`}\n\n${summonerName} 선수의 14분 시점 성과:\n## 벤치마크 데이터（${currentTier} 랭크 목표）\n- 목표 CS@14분: ${csGoal}\n- 목표 골드@14분: ${goldGoal}\n- 고티어 CS@14분: ${benchmarkRole.cs_14}\n- 고티어 골드@14분: ${benchmarkRole.gold_14}\n\n## 실제 퍼포먼스\n- CS@14분: ${actualCs}\n- 골드@14분: ${actualGold}\n- CS 효율: ${context.gameAnalysis.csEfficiency || actualPerformance.cs_efficiency || 0}%\n- 킬 관여율: ${context.gameAnalysis.killParticipation || 0}%\n- 와드 설치: ${actualWards}\n\n【코칭 요구사항】\n- APM에 대한 언급 피하기 (구현되지 않은 기능)\n- 구체적인 시간 (분:초)으로 액션 지정\n- 구체적인 장소 (드래곤 입구, 트라이부시 등) 명시\n- 상대 매치업을 고려한 구체적인 대책 제시\n- 룬 선택은 상대 ${context.matchContext.laneOpponent}와의 상성을 고려하여 근거를 명확히 설명\n- 킬 관여율 개선은 구체적인 장면 (예: 3:15 적 JG 풀클리어 후 갱킹 대응)에서 지시\n- \"반드시\", \"절대\" 등 단정적 표현을 피하고 상황에 따른 유연한 표현 사용\n- 제어 와드 구매는 \"1-2개 권장\" 등 유연한 표현 사용\n${actualGold > goldGoal ? \n  `- 현재 골드 ${actualGold}는 이미 목표 ${goldGoal}를 초과. 다음 단계(고티어 목표 ${benchmarkRole.gold_14})로의 개선점 제시` :\n  `- 현재 골드 ${actualGold}에서 목표 ${goldGoal}로의 구체적인 개선 방법 제시`}\n\n【달성도 체크】\n- 8분 시점: 서포트 아이템 퀘스트 완료 상황 평가\n- 14분 시점: 와드 설치 수 ${actualWards}개는 ${actualWards >= 8 ? '양호' : '개선 여지 있음'}\n- 킬 관여율 ${context.gameAnalysis.killParticipation}%: ${context.gameAnalysis.killParticipation === 0 ? '구체적인 개선 장면 제시' : '현황 평가'}\n\n【상대 분석】\n- 상대: ${context.matchContext.laneOpponent}\n- 이 상대에 대한 구체적인 전술과 룬 선택 근거 제시\n- 3:15 (적 JG 풀클리어 후) 갱킹 대응 방법 명시\n\n【추가 조사 판정 기준 - 강화판】\n다음의 경우 need_additional_research: true 설정하고 research_topics에 포함:\n- 상대 ${context.matchContext.laneOpponent}와의 특정 매치업 승률 데이터\n- 적 JG(Tryndamere 등) vs 아군 JG(Trundle 등)의 풀클리어 속도 비교\n- ${champion} vs ${context.matchContext.laneOpponent}에서 룬별 승률\n- 14분 시점 데미지 트레이드 통계 (킬 관여율 0%인 경우)\n\n【시간대별 스킬/레벨 예상】\n- 1:30: 레벨1 (Q or E)\n- 3:15-3:30: 레벨3-4 (Q,W,E 습득, R 미습득)\n- 6:00: 레벨5-6 (R 습득 직전 또는 직후)\n- 8:00: 레벨7-8 (R 습득 완료)\n- 14:00: 레벨8-9\n\n【경제적 현실성】\n- 8분 시점 서포트 예상 골드: 1200-1500\n- 서포트 아이템 1단계 완성 후: 렌즈로 변경 권장\n\n【라인 관리】\n- 3:15 전: 웨이브를 슬로우 푸시하여 아군 JG 위치에 맞춤\n- 갱킹 시: 웨이브가 밀려온 상태에서 프리즈\n- 로밍 시: 캐논 웨이브를 푸시 후 로밍\n\n반드시 다음 JSON 형식으로만 답변（설명 없음）:\n{\n  \"need_additional_research\": false,\n  \"research_topics\": [],\n  \"champion\": \"${champion}\",\n  \"role\": \"${roleOriginal}\",\n  \"patch\": \"${patch}\",\n  \"currentTier\": \"${currentTier}\",\n  \"nextTier\": \"${baseData.nextTier}\",\n  \"analysis\": {\n    \"cs_efficiency\": ${context.gameAnalysis.csEfficiency || Math.round((actualCs / csGoal) * 100)},\n    \"gold_efficiency\": ${Math.round((actualGold / goldGoal) * 100)},\n    \"itemization_score\": 75,\n    \"macro_play_rating\": ${Math.min(100, Math.max(0, (context.gameAnalysis.killParticipation || 0) * 2 + actualWards * 5))}\n  },\n  \"recommendations\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ? \n      `\"【8분 목표】서포트 아이템 퀘스트 완료 및 렌즈 변경 - ${actualGold >= 500 ? '순조롭게 진행, 렌즈 변경' : '포킹으로 스택 획득'}\",\n       \"【데미지 트레이드 평가】킬 관여율 ${context.gameAnalysis.killParticipation}% - ${context.gameAnalysis.killParticipation === 0 ? '14분에 0킬은 일반적. 중요한 것은 견제 빈도와 트레이드량' : '지속적인 압박 유지'}\",\n       \"【상대 특화 전술】${context.matchContext.laneOpponent} 상대 ${champion}의 룬 선택은 상대 데이터에 따라 조정 필요\"` :\n    role === 'JUNGLE' ?\n      `\"정글 CS를 ${csGoal}까지 개선（현재 ${actualCs}） - 효율적인 클리어 패스가 중요\",\n       \"${champion}의 패치 ${patch}에서 최적 정글 루트（블루/레드 시작） 실천\",\n       \"갱킹과 파밍 밸런스 개선 - 라이너의 웨이브 상황 파악 후 갱킹\"` :\n      `\"CS를 ${csGoal}까지 개선（현재 ${actualCs}） - 10CS/분을 의식한 라스트 히트\",\n       \"${champion}의 패치 ${patch}에서 웨이브 컨트롤 기술 습득\",\n       \"라인 관리 개선 - 슬로우 푸시, 프리즈, 패스트 푸시 구분 사용\"`}\n  ],\n  \"priority_actions\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ?\n      `\"【룬 선택】${context.matchContext.laneOpponent} 상대 통계 데이터 기반 선택 (추가 조사 권장)\",\n       \"【3:15-3:30】레벨3-4 예상, Q+W+E로 트레이드. R 미습득이므로 포지셔닝으로 안전 확보\",\n       \"【8분 목표】약 1200-1500골드 예상, 서포트 아이템 완성 후 렌즈로 변경\"` :\n    role === 'JUNGLE' ?\n      `\"첫 풀클리어를 3:30까지 완료\",\n       \"바위게 우선순위 이해하고 적절한 타이밍에 확보\",\n       \"14분까지 ${goldGoal} 골드 획득 목표\"` :\n      `\"첫 3웨이브에서 최대 18CS 중 17CS 이상 획득\",\n       \"14분까지 ${goldGoal} 골드 획득 목표\",\n       \"캐논 미니언 100% 확실히 획득（105골드 가치）\"`}\n  ],\n  \"benchmark_comparison\": {\n    \"vs_average\": ${Math.round(Math.max(-100, Math.min(100, ((actualCs / csGoal - 1) * 100))))},\n    \"vs_high_rank\": ${Math.round(Math.max(-100, Math.min(100, ((actualGold / benchmarkRole.gold_14 - 1) * 100))))}\n  }\n}`,\n\n  english: `You are a professional LoL coach. Analyze ${champion} (${roleOriginal}) in detail for the latest patch ${patch}.\n\n${championPrompt}\n\n## Match Context\n- Ally Team: ${context.matchContext.allyTeam}\n- Enemy Team: ${context.matchContext.enemyTeam}\n- Lane Opponent: ${context.matchContext.laneOpponent}\n\n## Analysis Points\n1. ${champion}'s matchup details against ${context.matchContext.laneOpponent}\n2. ${champion}-specific combos, skill rotations and mechanics for ${roleOriginal}\n${role === 'JUNGLE' ? \n  `3. Specific jungle path (e.g., Red→Krugs→Raptors→Wolves→Blue→Gromp by 3:30)\n   4. Enemy jungler-aware scuttle priority and gank timings (3:15, 5:00, 7:30, etc.)` : \nrole === 'UTILITY' || role === 'SUPPORT' ?\n  `3. Specific ward positions (e.g., 1:30 river bush, 3:15 dragon pit entrance, 5:00 tri-bush)\n   4. Specific lane combos with ADC (e.g., Lulu E→Q→ADC all-in)` :\n  `3. Wave management against ${context.matchContext.laneOpponent}\n   4. Level 2,3,6 power spike trading methods`}\n\n## Specific Timed Actions (${role})\n${role === 'UTILITY' || role === 'SUPPORT' ?\n  `- 1:30: First ward in river bush\n- 3:15: Start dragon vision control\n- 5:00-6:00: First recall (control ward mandatory)\n- 8:00: Support item quest completion target\n- 10:00-14:00: Objective area vision dominance` :\nrole === 'JUNGLE' ?\n  `- 1:30: Leash start (Red/Blue)\n- 3:15-3:30: First full clear completion\n- 3:30-4:00: Scuttle contest or first gank\n- 5:00: First recall\n- 6:00-14:00: Dragon/Herald control` :\n  `- 1:30-3:00: Aim for level 2 advantage\n- 3:00-5:00: Level 3 trade dominance\n- 5:00-6:00: First recall timing\n- 6:00-10:00: Level 6 power spike usage\n- 10:00-14:00: Side lane pressure or grouping`}\n\n${summonerName}'s 14-minute performance:\n## Benchmark Data (${currentTier} Rank Target)\n- Target CS@14min: ${csGoal}\n- Target Gold@14min: ${goldGoal}\n- High-elo CS@14min: ${benchmarkRole.cs_14}\n- High-elo Gold@14min: ${benchmarkRole.gold_14}\n\n## Actual Performance\n- CS@14min: ${actualCs}\n- Gold@14min: ${actualGold}\n- CS Efficiency: ${context.gameAnalysis.csEfficiency || actualPerformance.cs_efficiency || 0}%\n- Kill Participation: ${context.gameAnalysis.killParticipation || 0}%\n- Wards Placed: ${actualWards}\n\n【Coaching Requirements】\n- Avoid mentioning APM (not implemented feature)\n- Specify actions with exact timing (min:sec)\n- Specify exact locations (dragon pit entrance, tri-bush, etc.)\n- Provide specific counter strategies considering matchup\n- Rune selection should consider synergy with ${context.matchContext.laneOpponent} and provide clear reasoning\n- Kill participation improvement should specify concrete scenarios (e.g., 3:15 enemy JG full clear gank response)\n- Avoid absolute terms like \"must\" or \"always\", use flexible expressions based on situation\n- Control ward purchase should use flexible expressions like \"recommend 1-2 wards\"\n${actualGold > goldGoal ? \n  `- Current gold ${actualGold} already exceeds goal ${goldGoal}. Provide improvements toward high-elo target ${benchmarkRole.gold_14}` :\n  `- Provide specific improvements from current gold ${actualGold} to goal ${goldGoal}`}\n\n【Achievement Check】\n- 8 min: Evaluate support item quest completion status\n- 14 min: Ward placement count ${actualWards} is ${actualWards >= 8 ? 'good' : 'needs improvement'}\n- Kill participation ${context.gameAnalysis.killParticipation}%: ${context.gameAnalysis.killParticipation === 0 ? 'provide specific improvement scenarios' : 'evaluate current status'}\n\n【Matchup Analysis】\n- Opponent: ${context.matchContext.laneOpponent}\n- Provide specific tactics and rune selection reasoning for this matchup\n- Specify gank response at 3:15 (enemy JG full clear timing)\n\n【Enhanced Additional Research Criteria】\nSet need_additional_research: true and include in research_topics if:\n- Specific matchup win rate data for ${context.matchContext.laneOpponent} needed\n- Enemy JG (Tryndamere etc.) vs ally JG (Trundle etc.) clear speed comparison needed\n- ${champion} vs ${context.matchContext.laneOpponent} rune-specific win rates needed\n- Damage trade statistics at 14 min needed (if kill participation is 0%)\n\n【Time-based Skill/Level Assumptions】\n- 1:30: Level 1 (Q or E)\n- 3:15-3:30: Level 3-4 (Q,W,E acquired, R not available)\n- 6:00: Level 5-6 (R about to be acquired or just acquired)\n- 8:00: Level 7-8 (R acquired)\n- 14:00: Level 8-9\n\n【Economic Reality】\n- 8 min expected support gold: 1200-1500\n- After support item tier 1 completion: Recommend switching to Oracle Lens\n\n【Wave Management】\n- Before 3:15: Slow push wave to sync with ally JG position\n- During gank: Freeze wave when pushed in\n- For roam: Push cannon wave then roam\n\nReturn ONLY this JSON format (no explanations):\n{\n  \"need_additional_research\": false,\n  \"research_topics\": [],\n  \"champion\": \"${champion}\",\n  \"role\": \"${roleOriginal}\",\n  \"patch\": \"${patch}\",\n  \"currentTier\": \"${currentTier}\",\n  \"nextTier\": \"${baseData.nextTier}\",\n  \"analysis\": {\n    \"cs_efficiency\": ${context.gameAnalysis.csEfficiency || Math.round((actualCs / csGoal) * 100)},\n    \"gold_efficiency\": ${Math.round((actualGold / goldGoal) * 100)},\n    \"itemization_score\": 75,\n    \"macro_play_rating\": ${Math.min(100, Math.max(0, (context.gameAnalysis.killParticipation || 0) * 2 + actualWards * 5))}\n  },\n  \"recommendations\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ? \n      `\"[8 min goal] Support item quest completion and Oracle Lens switch - ${actualGold >= 500 ? 'On track, switch trinket' : 'Poke for stacks'}\",\n       \"[Damage trade evaluation] Kill participation ${context.gameAnalysis.killParticipation}% - ${context.gameAnalysis.killParticipation === 0 ? '0 kills at 14 min is common. Focus on harass frequency and trade volume' : 'Maintain consistent pressure'}\",\n       \"[Matchup-specific tactics] ${champion} rune choice vs ${context.matchContext.laneOpponent} should adjust based on matchup data\"` :\n    role === 'JUNGLE' ?\n      `\"Improve jungle CS to ${csGoal} (currently ${actualCs}) - Efficient clear path is crucial\",\n       \"Practice ${champion}'s optimal jungle route (Blue/Red start) for patch ${patch}\",\n       \"Balance ganking and farming - Read laner wave states before ganking\"` :\n      `\"Improve CS to ${csGoal} (currently ${actualCs}) - Focus on 10 CS/min last hitting\",\n       \"Master ${champion}'s wave control techniques for patch ${patch}\",\n       \"Improve lane management - Differentiate between slow push, freeze, and fast push\"`}\n  ],\n  \"priority_actions\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ?\n      `\"[Rune selection] Choose based on ${context.matchContext.laneOpponent} matchup statistics (additional research recommended)\",\n       \"[3:15-3:30] Level 3-4 expected, trade with Q+W+E. R not available so secure safety through positioning\",\n       \"[8 min goal] ~1200-1500 gold expected, switch to Oracle Lens after support item completion\"` :\n    role === 'JUNGLE' ?\n      `\"Complete first full clear by 3:30\",\n       \"Understand scuttle crab priority and secure at proper timing\",\n       \"Aim for ${goldGoal} gold by 14 minutes\"` :\n      `\"Secure 17+ CS from first 3 waves (18 max)\",\n       \"Aim for ${goldGoal} gold by 14 minutes\",\n       \"Secure 100% of cannon minions (105 gold value)\"`}\n  ],\n  \"benchmark_comparison\": {\n    \"vs_average\": ${Math.round(Math.max(-100, Math.min(100, ((actualCs / csGoal - 1) * 100))))},\n    \"vs_high_rank\": ${Math.round(Math.max(-100, Math.min(100, ((actualGold / benchmarkRole.gold_14 - 1) * 100))))}\n  }\n}`\n};\n\n// chatInputを生成（言語が存在しない場合はエラー）\nlet chatInput;\nif (promptTemplates[baseData.language]) {\n  chatInput = promptTemplates[baseData.language];\n} else {\n  throw new Error(`Unsupported language: ${baseData.language}. Supported: japanese, korean, english`);\n}\n\n// Return simplified data structure with additional info for Format BrightData Query\nreturn {\n  json: {\n    // AI Agent用の必須フィールド\n    chatInput: chatInput,\n    \n    // Format BrightData Query用に追加（重要！）\n    summonerName: baseData.summonerName,\n    matchId: baseData.matchId,\n    champion: baseData.champion,\n    role: baseData.role,\n    patch: patch,  // パッチ情報を追加\n    currentTier: baseData.currentTier,\n    nextTier: baseData.nextTier,\n    division: baseData.division,\n    language: baseData.language,\n    locale: baseData.locale,\n    cache_key: baseData.cache_key,\n    coachingContext: context\n  }\n};"
+      },
+      "id": "e9b85444-dabf-451b-a2bb-b8a44088d4eb",
+      "name": "Build RAG Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1616,
+        -464
+      ]
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "id": "afd2b99c-1fbd-42e5-8756-f2f3c9c1147f",
+      "name": "Merge All Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -1776,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM fourteen_min_analysis WHERE match_id = '{{ $(\"Extract Data\").item.json.matchId }}'",
+        "options": {}
+      },
+      "id": "4672f401-3668-4584-9dcd-7b38e1687657",
+      "name": "Get 14-Min Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -3280,
+        -32
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH patch_data AS (\n  SELECT \n    champion,\n    role,\n    prediction_type,\n    confidence,\n    reasoning,\n    metadata,\n    source_region,\n    created_at\n  FROM meta_predictions\n  WHERE \n    champion = '{{ $(\"Extract Data\").item.json.champion }}'\n    AND role = '{{ $(\"Extract Data\").item.json.role }}'\n    AND (metadata->>'patch' = '{{ $(\"Extract Data\").item.json.patch }}' \n         OR metadata IS NULL)\n  ORDER BY created_at DESC\n  LIMIT 1\n)\nSELECT \n  COALESCE(pd.champion, '{{ $(\"Extract Data\").item.json.champion }}') as champion,\n  COALESCE(pd.role, '{{ $(\"Extract Data\").item.json.role }}') as role,\n  '{{ $(\"Extract Data\").item.json.patch }}' as patch,\n  COALESCE(pd.prediction_type, 'no_data_for_patch') as prediction_type,\n  COALESCE(pd.confidence, 0) as confidence,\n  COALESCE(pd.reasoning, 'No meta predictions available for patch {{ $(\"Extract Data\").item.json.patch }}') as reasoning,\n  pd.metadata->>'win_rate' as win_rate,\n  pd.metadata->>'pick_rate' as pick_rate,\n  pd.metadata,\n  pd.source_region,\n  pd.metadata->'build_path' as build_path,\n  pd.metadata->'rune_setup' as rune_setup,\n  CASE WHEN pd.champion IS NOT NULL THEN true ELSE false END as has_data\nFROM patch_data pd\nRIGHT JOIN (SELECT 1) dummy ON true;",
+        "options": {}
+      },
+      "id": "14606ee1-8d01-4d70-bf85-04bc11361b77",
+      "name": "Get Meta Knowledge",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -3280,
+        -208
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO tier_meta_cache (\n  champion, \n  tier, \n  role, \n  server, \n  source, \n  patch_version, \n  scraped_data\n) VALUES (\n  '{{ $json.champion }}', \n  '{{ $json.tier }}', \n  '{{ $json.role }}', \n  '{{ $json.server }}', \n  '{{ $json.source }}', \n  '{{ $json.patch }}',\n  $JSON${{ JSON.stringify($json) }}$JSON$::jsonb\n) \nON CONFLICT (champion, tier, role, server, source, patch_version) \nDO UPDATE SET \n  scraped_data = $JSON${{ JSON.stringify($json) }}$JSON$::jsonb, \n  expires_at = (CURRENT_TIMESTAMP + INTERVAL '7 days')",
+        "options": {}
+      },
+      "id": "7d8db5f0-6fb4-42a8-8b42-180978461d26",
+      "name": "Store in Tier Cache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -1968,
+        -288
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse LoLalytics data with HTML node results\nconst htmlNodeData = $json;\n\n// percentages配列から全ての必要なデータを抽出\nconst percentagesText = htmlNodeData.percentages?.join('\\n') || '';\n\n// URLパターンからメタデータを抽出\n// パターン例: /lol/lulu/build/?tier=silver&region=jp&patch=15.14\nconst urlMatch = percentagesText.match(/\\/lol\\/([^\\/]+)\\/build\\/\\?(?:lane=\\w+&)?tier=([^&]+)&region=([^&]+)&patch=([\\d.]+)/);\n\n// inputDataを構築（全てpercentagesから動的に取得）\nconst inputData = {\n  champion: urlMatch ? urlMatch[1].charAt(0).toUpperCase() + urlMatch[1].slice(1) : 'Unknown',\n  tier: urlMatch ? urlMatch[2].toUpperCase() : 'UNKNOWN',\n  server: urlMatch ? urlMatch[3] : 'unknown',\n  patch: urlMatch ? urlMatch[4] : 'unknown',\n  type: 'current', // 現在のティアデータとして処理\n  role: percentagesText.includes('support lane') ? 'UTILITY' : \n        percentagesText.includes('top lane') ? 'TOP' :\n        percentagesText.includes('jungle lane') ? 'JUNGLE' :\n        percentagesText.includes('middle lane') ? 'MIDDLE' :\n        percentagesText.includes('bottom lane') ? 'BOTTOM' : 'UNKNOWN'\n};\n\n// デバッグ用\nconsole.log('Extracted inputData from percentages:', inputData);\n\n// HTMLコンテンツは使用しない（ペアリングエラー回避）\nconst brightDataRaw = '';\n\n// デバッグ: HTMLノードの出力を確認\nconsole.log('=== HTML Node Output ===');\nconsole.log('HTML Node data keys:', Object.keys(htmlNodeData));\nconsole.log('winRate from HTML node:', htmlNodeData.winRate);\nconsole.log('pickRate from HTML node:', htmlNodeData.pickRate);\nconsole.log('banRate from HTML node:', htmlNodeData.banRate);\nconsole.log('tier from HTML node:', htmlNodeData.tier);\nconsole.log('items from HTML node:', htmlNodeData.items);\nconsole.log('percentages found:', htmlNodeData.percentages?.slice(0, 10));\n\n// デフォルト値\nlet items = [];\nlet runes = [];\nlet stats = {\n  winRate: 'N/A',\n  pickRate: 'N/A',\n  banRate: 'N/A',\n  tier: 'N/A'\n};\n\n// percentages配列からデータを抽出\nif (htmlNodeData.percentages && htmlNodeData.percentages.length > 0) {\n  // percentages配列を文字列に結合\n  const percentagesText = htmlNodeData.percentages.join('\\n');\n  console.log('Searching in percentages text for statistics...');\n  \n  // Win Rate: \"has a X% win rate\" パターン\n  const winRateMatch = percentagesText.match(/has a ([\\d.]+)%\\s*win rate/i);\n  if (winRateMatch) {\n    stats.winRate = winRateMatch[1] + '%';\n    console.log('Found Win Rate from percentages:', stats.winRate);\n  }\n  \n  // もし上記で見つからない場合、別のパターンを試す\n  if (stats.winRate === 'N/A') {\n    // \"46.26%\\nWin Rate\" パターン\n    const altWinRateMatch = percentagesText.match(/([\\d.]+)%\\s*\\n*Win Rate/);\n    if (altWinRateMatch) {\n      stats.winRate = altWinRateMatch[1] + '%';\n      console.log('Found Win Rate (alt pattern):', stats.winRate);\n    }\n  }\n  \n  // Pick Rate: \"X%\\nPick Rate\" パターン\n  const pickRateMatch = percentagesText.match(/([\\d.]+)%\\s*\\n*Pick Rate/);\n  if (pickRateMatch) {\n    stats.pickRate = pickRateMatch[1] + '%';\n    console.log('Found Pick Rate from percentages:', stats.pickRate);\n  }\n  \n  // Ban Rate: \"X%\\nBan Rate\" パターン\n  const banRateMatch = percentagesText.match(/([\\d.]+)%\\s*\\n*Ban Rate/);\n  if (banRateMatch) {\n    stats.banRate = banRateMatch[1] + '%';\n    console.log('Found Ban Rate from percentages:', stats.banRate);\n  }\n  \n  // Tier: \"graded X Tier\" パターン\n  const tierMatch = percentagesText.match(/graded ([A-Z])\\s*Tier/i);\n  if (tierMatch) {\n    stats.tier = tierMatch[1];\n    console.log('Found Tier from percentages:', stats.tier);\n  }\n  \n  // もしTierが見つからない場合、単独の\"C\"などを探す\n  if (stats.tier === 'N/A') {\n    // \"C\\n82%\" のようなパターン\n    const altTierMatch = percentagesText.match(/\\n([A-Z])\\n\\d+%/);\n    if (altTierMatch) {\n      stats.tier = altTierMatch[1];\n      console.log('Found Tier (alt pattern):', stats.tier);\n    }\n  }\n}\n\n// HTMLノードから直接取得できた値があれば優先的に使用\nif (htmlNodeData.winRate && htmlNodeData.winRate !== 'N/A') {\n  stats.winRate = htmlNodeData.winRate;\n}\nif (htmlNodeData.pickRate && htmlNodeData.pickRate !== 'N/A') {\n  stats.pickRate = htmlNodeData.pickRate;\n}\nif (htmlNodeData.banRate && htmlNodeData.banRate !== 'N/A') {\n  stats.banRate = htmlNodeData.banRate;\n}\nif (htmlNodeData.tier && htmlNodeData.tier !== 'N/A' && htmlNodeData.tier !== 'l') {\n  stats.tier = htmlNodeData.tier;\n}\n\n// アイテムとルーンの処理\nitems = htmlNodeData.items || [];\nrunes = htmlNodeData.runes || [];\n\n// HTMLノードで取得できなかった場合、percentagesテキストから抽出を試みる\nif (items.length === 0 && htmlNodeData.percentages) {\n  const percentagesText = htmlNodeData.percentages.join('\\n');\n  \n  const commonItems = [\n    'Dream Maker',\n    'Moonstone Renewer',\n    'Ionian Boots of Lucidity',\n    'Boots of Swiftness',\n    'Redemption',\n    'Ardent Censer',\n    'Staff of Flowing Water',\n    'Mikael\\'s Blessing',\n    'Chemtech Putrifier',\n    'Cosmic Drive',\n    'Vigilant Wardstone',\n    'Shurelya\\'s Battlesong',\n    'Imperial Mandate',\n    'Echoes of Helia',\n    'Locket of the Iron Solari',\n    'Morellonomicon'\n  ];\n  \n  // アイテムの勝率も抽出\n  const itemWinRates = {};\n  \n  commonItems.forEach(itemName => {\n    if (percentagesText.includes(itemName)) {\n      const escapedName = itemName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // 複数のパターンを試す\n      const patterns = [\n        // パターン1: Loading...の後に勝率とゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]*?(\\\\d+)', 'i'),\n        // パターン2: アイテム名の後に直接数値（50文字以内）\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,100}?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,20}?(\\\\d+)', 'i'),\n        // パターン3: より緩いパターン\n        new RegExp(escapedName + '[^\\\\d]*(\\\\d+\\\\.\\\\d+)%[^\\\\d]*(\\\\d+)', 'i')\n      ];\n      \n      let match = null;\n      for (const pattern of patterns) {\n        match = percentagesText.match(pattern);\n        if (match) {\n          console.log(`Pattern matched for ${itemName}:`, pattern.source.substring(0, 50) + '...');\n          break;\n        }\n      }\n      \n      if (match) {\n        items.push({\n          name: itemName,\n          winRate: match[1] + '%',\n          games: parseInt(match[2])\n        });\n        console.log(`Found item ${itemName} with ${match[1]}% win rate (${match[2]} games)`);\n      } else {\n        // デバッグ: なぜマッチしないか確認\n        const index = percentagesText.indexOf(itemName);\n        if (index >= 0) {\n          console.log(`Debug - Text around ${itemName}:`, \n            percentagesText.substring(index, Math.min(index + 150, percentagesText.length)).replace(/\\n/g, '\\\\n'));\n        }\n        items.push({\n          name: itemName,\n          winRate: 'N/A',\n          games: 0\n        });\n      }\n    }\n  });\n  items = items.slice(0, 6);\n  console.log('Found items from percentages:', items.length, items.map(i => `${i.name} (${i.winRate})`));\n}\n\nif (runes.length === 0 && htmlNodeData.percentages) {\n  const percentagesText = htmlNodeData.percentages.join('\\n');\n  \n  const commonRunes = [\n    'Grasp of the Undying',\n    'Aftershock',\n    'Guardian',\n    'Summon Aery',\n    'Arcane Comet',\n    'Phase Rush',\n    'Electrocute',\n    'Predator',\n    'Dark Harvest',\n    'Hail of Blades',\n    'Lethal Tempo',\n    'Fleet Footwork',\n    'Conqueror',\n    'Press the Attack',\n    'Unsealed Spellbook',\n    'Glacial Augment',\n    'First Strike'\n  ];\n  \n  commonRunes.forEach(runeName => {\n    if (percentagesText.includes(runeName)) {\n      const escapedName = runeName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // 複数のパターンを試す\n      const patterns = [\n        // パターン1: Loading...の後、Win Rateあり\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%\\\\s*Win\\\\s*Rate[\\\\s\\\\S]*?(\\\\d+)\\\\s*Games', 'i'),\n        // パターン2: Loading...の後、Gamesだけ\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]*?(\\\\d+)\\\\s*Games', 'i'),\n        // パターン3: Win Rateパターン（Loading...なし）\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,100}?(\\\\d+\\\\.\\\\d+)%\\\\s*Win\\\\s*Rate[\\\\s\\\\S]{0,30}?(\\\\d+)\\\\s*Games', 'i'),\n        // パターン4: シンプルなパターン\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,50}?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?(\\\\d+)\\\\s*Games', 'i')\n      ];\n      \n      let match = null;\n      for (const pattern of patterns) {\n        match = percentagesText.match(pattern);\n        if (match) {\n          console.log(`Pattern matched for ${runeName}:`, pattern.source.substring(0, 50) + '...');\n          break;\n        }\n      }\n      \n      if (match) {\n        runes.push({\n          name: runeName,\n          winRate: match[1] + '%',\n          games: parseInt(match[2])\n        });\n        console.log(`Found rune ${runeName} with ${match[1]}% win rate (${match[2]} games)`);\n      } else {\n        // デバッグ: なぜマッチしないか確認\n        const index = percentagesText.indexOf(runeName);\n        if (index >= 0) {\n          console.log(`Debug - Text around ${runeName}:`, \n            percentagesText.substring(index, Math.min(index + 150, percentagesText.length)).replace(/\\n/g, '\\\\n'));\n        }\n        runes.push({\n          name: runeName,\n          winRate: 'N/A',\n          games: 0\n        });\n      }\n    }\n  });\n  runes = runes.slice(0, 9);\n  console.log('Found runes from percentages:', runes.length, runes.map(r => `${r.name} (${r.winRate})`));\n}\n\n// もし統計データがまだ取得できていない場合、生HTMLから直接抽出を試みる（フォールバック）\nif (brightDataRaw && brightDataRaw.length > 0 && (stats.winRate === 'N/A' || stats.pickRate === 'N/A')) {\n  const html = brightDataRaw;\n  console.log('Fallback: Trying to extract from raw HTML...');\n  \n  // Win Rate\n  if (stats.winRate === 'N/A') {\n    const winRatePatterns = [\n      /(?:Champion\\s+)?Win\\s*Rate[:\\s]*([0-9]+\\.?[0-9]*)\\s*%/i,\n      /WR[:\\s]*([0-9]+\\.?[0-9]*)\\s*%/i,\n      /\"winRate\"[:\\s]*([0-9]+\\.?[0-9]*)/i\n    ];\n    \n    for (const pattern of winRatePatterns) {\n      const match = html.match(pattern);\n      if (match) {\n        stats.winRate = match[1] + '%';\n        console.log('Found Win Rate from raw HTML:', stats.winRate);\n        break;\n      }\n    }\n  }\n  \n  // Pick Rate\n  if (stats.pickRate === 'N/A') {\n    const pickRatePatterns = [\n      /Pick\\s*Rate[:\\s]*([0-9]+\\.?[0-9]*)\\s*%/i,\n      /PR[:\\s]*([0-9]+\\.?[0-9]*)\\s*%/i,\n      /\"pickRate\"[:\\s]*([0-9]+\\.?[0-9]*)/i\n    ];\n    \n    for (const pattern of pickRatePatterns) {\n      const match = html.match(pattern);\n      if (match) {\n        stats.pickRate = match[1] + '%';\n        console.log('Found Pick Rate from raw HTML:', stats.pickRate);\n        break;\n      }\n    }\n  }\n  \n  // Ban Rate\n  if (stats.banRate === 'N/A') {\n    const banRatePatterns = [\n      /Ban\\s*Rate[:\\s]*([0-9]+\\.?[0-9]*)\\s*%/i,\n      /BR[:\\s]*([0-9]+\\.?[0-9]*)\\s*%/i,\n      /\"banRate\"[:\\s]*([0-9]+\\.?[0-9]*)/i\n    ];\n    \n    for (const pattern of banRatePatterns) {\n      const match = html.match(pattern);\n      if (match) {\n        stats.banRate = match[1] + '%';\n        console.log('Found Ban Rate from raw HTML:', stats.banRate);\n        break;\n      }\n    }\n  }\n  \n  // Tier\n  if (stats.tier === 'N/A') {\n    const tierPatterns = [\n      /Tier[:\\s]*([A-Z][+-]?)/i,\n      /\"tier\"[:\\s]*\"([A-Z][+-]?)\"/i\n    ];\n    \n    for (const pattern of tierPatterns) {\n      const match = html.match(pattern);\n      if (match) {\n        stats.tier = match[1];\n        console.log('Found Tier from raw HTML:', stats.tier);\n        break;\n      }\n    }\n  }\n}\n\n// アイテムとルーンを適切な形式に変換\nif (Array.isArray(items) && items.length > 0 && typeof items[0] === 'string') {\n  items = items.map(name => ({ name, winRate: 'N/A' }));\n}\n\nif (Array.isArray(runes) && runes.length > 0 && typeof runes[0] === 'string') {\n  runes = runes.map(name => ({ name, winRate: 'N/A' }));\n}\n\n// 結果を返す\nconst parsedData = {\n  source: 'lolalytics',\n  champion: inputData.champion,\n  tier: inputData.tier,\n  tierType: inputData.type,\n  patch: inputData.patch,\n  items: items.slice(0, 6),\n  runes: runes.slice(0, 9),\n  stats: stats,\n  server: inputData.server,\n  role: inputData.role,\n  scrapedAt: new Date().toISOString(),\n  debug: {\n    htmlLength: brightDataRaw?.length || 0,\n    hasData: !!(items.length || runes.length || stats.winRate !== 'N/A'),\n    staticSite: true,\n    patchUsed: inputData.patch,\n    htmlNodeWorked: !!(htmlNodeData.percentages?.length > 0),\n    percentagesExtracted: {\n      winRate: stats.winRate !== 'N/A',\n      pickRate: stats.pickRate !== 'N/A',\n      banRate: stats.banRate !== 'N/A',\n      tier: stats.tier !== 'N/A'\n    }\n  }\n};\n\nconsole.log('Final parsed data:', JSON.stringify(parsedData, null, 2));\n\nreturn { json: parsedData };"
+      },
+      "id": "b61fa963-de22-4a96-94af-89078a3caa88",
+      "name": "Parse LoLalytics Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2160,
+        -384
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "dataPropertyName": "htmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "winRate",
+              "cssSelector": ".win-rate, [data-win-rate], .champion-stats span:contains('Win Rate') + span, .stat-value:contains('%')"
+            },
+            {
+              "key": "pickRate",
+              "cssSelector": ".pick-rate, [data-pick-rate], .champion-stats span:contains('Pick Rate') + span"
+            },
+            {
+              "key": "banRate",
+              "cssSelector": ".ban-rate, [data-ban-rate], .champion-stats span:contains('Ban Rate') + span"
+            },
+            {
+              "key": "tier",
+              "cssSelector": ".tier, .champion-tier, [data-tier]"
+            },
+            {
+              "key": "items",
+              "cssSelector": ".item-build img, .core-items img, .items-container img",
+              "returnValue": "attribute",
+              "attribute": "alt",
+              "returnArray": true
+            },
+            {
+              "key": "runes",
+              "cssSelector": ".rune-container img, .runes img, [data-rune]",
+              "returnValue": "attribute",
+              "attribute": "alt",
+              "returnArray": true
+            },
+            {
+              "key": "percentages",
+              "cssSelector": "span:contains('%'), div:contains('%')",
+              "returnArray": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "47a466ba-12fb-480e-9704-f263fddb1563",
+      "name": "Extract Stats",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        -2352,
+        -384
+      ],
+      "notes": "Extract statistics using CSS selectors"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format BrightData output for HTML node\nconst input = $json;\n\n// BrightDataは直接文字列としてHTMLを返す\nif (typeof input === 'string') {\n  console.log('BrightData returned HTML string, length:', input.length);\n  return { \n    json: { \n      htmlContent: input \n    } \n  };\n}\n\n// もしオブジェクトの場合（通常はないが念のため）\nif (typeof input === 'object' && input !== null) {\n  console.log('BrightData returned object, keys:', Object.keys(input));\n  // 最初の文字列プロパティを探す\n  for (const key of Object.keys(input)) {\n    if (typeof input[key] === 'string' && input[key].includes('<')) {\n      console.log(`Found HTML in property \"${key}\"`);\n      return { \n        json: { \n          htmlContent: input[key] \n        } \n      };\n    }\n  }\n}\n\n// フォールバック\nconsole.error('Unexpected BrightData output format');\nreturn { \n  json: { \n    htmlContent: String(input) \n  } \n};"
+      },
+      "id": "008dbfbb-ed31-4bcf-8fe9-6c390be51d19",
+      "name": "Format for HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2544,
+        -384
+      ],
+      "notes": "Format BrightData output for HTML extraction node"
+    },
+    {
+      "parameters": {
+        "zone": {
+          "__rl": true,
+          "value": "web_unlocker_lol",
+          "mode": "list",
+          "cachedResultName": "web_unlocker_lol"
+        },
+        "country": {
+          "__rl": true,
+          "mode": "list",
+          "value": "us"
+        },
+        "url": "={{ $('Generate LoLalytics URLs').item.json.url }}",
+        "requestOptions": {}
+      },
+      "type": "@brightdata/n8n-nodes-brightdata.brightData",
+      "typeVersion": 1,
+      "position": [
+        -2736,
+        -384
+      ],
+      "id": "b0c83ef9-3a12-4a1a-afa1-8a965ebedb53",
+      "name": "Scrape League of Graphs",
+      "credentials": {
+        "brightdataApi": {
+          "id": "wNwKLsIIuZMGu8dD",
+          "name": "BrightData account"
+        }
+      },
+      "notes": "Scrapes tier-specific meta data from League of Graphs using BrightData"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "condition-tier-cache",
+              "leftValue": "={{ String($json.has_cache) }}",
+              "rightValue": "\"true\"",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "55bd785c-a0c2-4983-a371-624fd31e301a",
+      "name": "Is Tier Cached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -2960,
+        -480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  scraped_data,\n  CASE \n    WHEN scraped_data IS NOT NULL THEN true \n    ELSE false \n  END as has_cache\nFROM (\n  SELECT scraped_data \n  FROM tier_meta_cache \n  WHERE champion = '{{ $json.champion }}' \n  AND tier = '{{ $json.tier }}' \n  AND server = '{{ $json.server }}' \n  AND source = 'leagueofgraphs' \n  AND expires_at > NOW()\n  LIMIT 1\n) as cache_check\nUNION ALL\nSELECT NULL as scraped_data, false as has_cache\nWHERE NOT EXISTS (\n  SELECT 1 FROM tier_meta_cache \n  WHERE champion = '{{ $json.champion }}' \n  AND tier = '{{ $json.tier }}' \n  AND server = '{{ $json.server }}' \n  AND source = 'leagueofgraphs' \n  AND expires_at > NOW()\n)\nLIMIT 1",
+        "options": {}
+      },
+      "id": "60f23599-b524-4167-9d54-1f384c6f4a57",
+      "name": "Check Tier Cache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -3120,
+        -480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "condition-cache",
+              "leftValue": "={{ $json.has_cache }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2e954b48-2928-4e8d-b324-40394f87cbe9",
+      "name": "Is Cached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -3472,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  analysis_result,\n  CASE \n    WHEN analysis_result IS NOT NULL THEN true \n    ELSE false \n  END as has_cache\nFROM (\n  SELECT analysis_result \n  FROM ai_analysis_cache \n  WHERE cache_key = '{{ $json.cache_key }}' \n  AND expires_at > NOW()\n  LIMIT 1\n) as cache_check\nUNION ALL\nSELECT NULL as analysis_result, false as has_cache\nWHERE NOT EXISTS (\n  SELECT 1 FROM ai_analysis_cache \n  WHERE cache_key = '{{ $json.cache_key }}' \n  AND expires_at > NOW()\n)\nLIMIT 1",
+        "options": {}
+      },
+      "id": "88761232-9170-4463-ae3a-6f58f8373de3",
+      "name": "Check AI Cache",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -3664,
+        -304
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract webhook data - NO HARDCODED DEFAULTS\nconst webhookData = $input.first().json.body || $input.first().json;\n\nconst {\n  summonerName,\n  region,\n  matchId,\n  champion,\n  role,\n  tier,\n  division,\n  locale,\n  patch,\n  cache_key,\n  // ベンチマークデータを追加\n  expected_cs_14,\n  expected_gold_14,\n  common_items,\n  win_rate,\n  sample_size,\n  // 実際のパフォーマンスデータ\n  cs_at_14,\n  gold_at_14,\n  cs_efficiency,\n  team_gold_diff,\n  win_prediction\n} = webhookData;\n\n// Validate ALL required fields\nif (!summonerName) {\n  throw new Error('summonerName is required from backend');\n}\n\nif (!region) {\n  throw new Error('region is required from backend');\n}\n\nif (!matchId) {\n  throw new Error('matchId is required from backend');\n}\n\nif (!champion) {\n  throw new Error('champion is required from backend');\n}\n\nif (!role) {\n  throw new Error('role is required from backend');\n}\n\nif (!tier) {\n  throw new Error('tier is required from backend');\n}\n\nif (!locale) {\n  throw new Error('locale is required from backend');\n}\n\nif (!patch) {\n  throw new Error('patch is required from backend');\n}\n\nif (!cache_key) {\n  throw new Error('cache_key is required from backend');\n}\n\n// Map locale to language for prompts (mapping table is necessary, not a default)\nconst languageMap = {\n  'jp': 'japanese',\n  'ja': 'japanese',\n  'ko': 'korean',\n  'en': 'english'\n};\n\nconst language = languageMap[locale];\nif (!language) {\n  throw new Error(`Unsupported locale: ${locale}. Supported: jp, ja, ko, en`);\n}\n\n// Calculate next tier for progression advice\nfunction getNextTier(currentTier) {\n  const progression = {\n    'IRON': 'BRONZE',\n    'BRONZE': 'SILVER',\n    'SILVER': 'GOLD',\n    'GOLD': 'PLATINUM',\n    'PLATINUM': 'EMERALD',\n    'EMERALD': 'DIAMOND',\n    'DIAMOND': 'MASTER',\n    'MASTER': 'GRANDMASTER',\n    'GRANDMASTER': 'CHALLENGER',\n    'CHALLENGER': 'CHALLENGER',\n    'UNRANKED': 'SILVER'\n  };\n  \n  const nextTier = progression[currentTier.toUpperCase()];\n  if (!nextTier) {\n    throw new Error(`Unknown tier: ${currentTier}`);\n  }\n  \n  return nextTier;\n}\n\nconst nextTier = getNextTier(tier);\n\nreturn {\n  json: {\n    summonerName,\n    region,\n    matchId,\n    champion,\n    role,\n    currentTier: tier,\n    nextTier,\n    division,\n    language,\n    locale,\n    patch,\n    cache_key,\n    server: region.toLowerCase(),\n    // ベンチマークデータを追加\n    benchmarks: {\n      expected_cs_14: expected_cs_14 || null,\n      expected_gold_14: expected_gold_14 || null,\n      common_items: common_items || [],\n      win_rate: win_rate || null,\n      sample_size: sample_size || null\n    },\n    // 実際のパフォーマンスデータ\n    actual_performance: {\n      cs_at_14: cs_at_14 || null,\n      gold_at_14: gold_at_14 || null,\n      cs_efficiency: cs_efficiency || null,\n      team_gold_diff: team_gold_diff || null,\n      win_prediction: win_prediction || null\n    }\n  }\n};"
+      },
+      "id": "306fbf9d-d4e2-4f05-91d8-fece1d59f74d",
+      "name": "Extract Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3856,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "=POST",
+        "path": "14coacher",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "729c38b1-41b7-4bc2-bb00-3158fdee7a46",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -4048,
+        -304
+      ],
+      "webhookId": "fd6a355e-ffaa-44c9-8909-846128e88971",
+      "notes": "Receives data from backend with player info and language preference"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -1120,
+        -224
+      ],
+      "id": "6e91fdf2-942a-4b68-a2e4-3cf67449be1c",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// BrightDataの出力をHTML抽出用にフォーマット（url2用）\n// Format BrightData Queryからのメタデータも含める\n\n// Format BrightData Queryからのデータを取得\nconst queryData = $node[\"Format BrightData Query\"].json || {};\nconst originalData = queryData.originalData || {};\n\n// BrightDataノードからのHTML出力を取得\nconst items = $input.all();\nconst formattedItems = [];\n\nitems.forEach(item => {\n  const scraperOutput = item.json;\n  \n  // HTMLコンテンツを取得（BrightDataは直接文字列として返すことがある）\n  let html = '';\n  if (typeof scraperOutput === 'string') {\n    html = scraperOutput;\n  } else if (scraperOutput.html) {\n    html = scraperOutput.html;\n  } else if (scraperOutput.content) {\n    html = scraperOutput.content;\n  } else if (scraperOutput.body) {\n    html = scraperOutput.body;\n  } else if (Array.isArray(scraperOutput) && scraperOutput.length > 0) {\n    // 配列の場合は最初の要素を使用\n    html = scraperOutput[0];\n  } else {\n    // オブジェクト全体が返された場合\n    html = JSON.stringify(scraperOutput);\n  }\n  \n  // url2用のメタデータを使用\n  formattedItems.push({\n    json: {\n      htmlContent: html,\n      url: queryData.url2 || '',\n      type: queryData.type2 || 'rune_data',\n      description: queryData.description2 || '',\n      champion: originalData.champion || '',\n      role: originalData.role || '',\n      patch: originalData.patch || '',\n      currentTier: originalData.currentTier || '',\n      nextTier: originalData.nextTier || '',\n      originalData: originalData\n    }\n  });\n});\n\nreturn formattedItems;"
+      },
+      "id": "9039967e-3e98-423d-8fb0-356e775854fd",
+      "name": "Format Research HTML_build",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        -144
+      ],
+      "notes": "Format BrightData output for HTML extraction"
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "dataPropertyName": "htmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "buildWinRate",
+              "cssSelector": ".build-win-rate, [data-build-win-rate], .build-stats .win-rate, .item-set-win-rate"
+            },
+            {
+              "key": "buildPickRate",
+              "cssSelector": ".build-pick-rate, [data-build-pick-rate], .build-stats .pick-rate, .item-set-pick-rate"
+            },
+            {
+              "key": "coreBuild",
+              "cssSelector": ".core-build img, .item-build img, .item-set img, .recommended-items img",
+              "returnValue": "attribute",
+              "attribute": "alt",
+              "returnArray": true
+            },
+            {
+              "key": "buildOrder",
+              "cssSelector": ".build-order .item, .item-sequence img, .item-timeline img, .build-path img",
+              "returnValue": "attribute",
+              "attribute": "alt",
+              "returnArray": true
+            },
+            {
+              "key": "buildRunes",
+              "cssSelector": ".build-runes img, .rune-build img, .recommended-runes img, [data-rune]",
+              "returnValue": "attribute",
+              "attribute": "alt",
+              "returnArray": true
+            },
+            {
+              "key": "startingItems",
+              "cssSelector": ".starting-items img, .starter-items img, .early-game-items img",
+              "returnValue": "attribute",
+              "attribute": "alt",
+              "returnArray": true
+            },
+            {
+              "key": "percentages",
+              "cssSelector": "span:contains('%'), div:contains('%')",
+              "returnArray": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8bd52f2c-acaa-48f6-aa5f-57af615992ab",
+      "name": "Extract Research Stats_build",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        -512,
+        -144
+      ],
+      "notes": "Extract stats from research HTML"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Research Data_build - LoLalytics build data parser\n// HTMLノードからの出力を処理し、AI用のサマリーを生成\n\nconst htmlNodeData = $json;\nconst percentagesText = htmlNodeData.percentages?.join('\\n') || '';\n\n// デバッグ用\nconsole.log('=== Parse Research Data_build ===');\nconsole.log('HTML Node data keys:', Object.keys(htmlNodeData));\nconsole.log('percentages length:', htmlNodeData.percentages?.length || 0);\n\n// ゲーム数をパースする関数\nfunction parseGames(gamesStr) {\n  if (!gamesStr) return 0;\n  return parseInt(gamesStr.toString().replace(/,/g, '')) || 0;\n}\n\n// デフォルト値\nlet stats = {\n  winRate: 'N/A',\n  pickRate: 'N/A',\n  banRate: 'N/A',\n  tier: 'N/A'\n};\nlet items = [];\nlet primaryRunes = [];\nlet secondaryRunes = [];\nlet startingItems = [];\n\n// percentagesテキストから統計データを抽出\nif (percentagesText) {\n  // Win Rate: \"51.34%\" パターン\n  const winRateMatch = percentagesText.match(/has a ([\\d.]+)%\\s*win rate/i);\n  if (winRateMatch) {\n    stats.winRate = winRateMatch[1] + '%';\n    console.log('Found Win Rate:', stats.winRate);\n  }\n  \n  // 別のパターン: \"X%\\nWin Rate\"\n  if (stats.winRate === 'N/A') {\n    const altWinRateMatch = percentagesText.match(/([\\d.]+)%\\s*\\n*Win Rate/);\n    if (altWinRateMatch) {\n      stats.winRate = altWinRateMatch[1] + '%';\n      console.log('Found Win Rate (alt):', stats.winRate);\n    }\n  }\n  \n  // Pick Rate: \"10.54%\\nPick Rate\"\n  const pickRateMatch = percentagesText.match(/([\\d.]+)%\\s*\\n*Pick Rate/);\n  if (pickRateMatch) {\n    stats.pickRate = pickRateMatch[1] + '%';\n    console.log('Found Pick Rate:', stats.pickRate);\n  }\n  \n  // Ban Rate: \"13.86%\\nBan Rate\"\n  const banRateMatch = percentagesText.match(/([\\d.]+)%\\s*\\n*Ban Rate/);\n  if (banRateMatch) {\n    stats.banRate = banRateMatch[1] + '%';\n    console.log('Found Ban Rate:', stats.banRate);\n  }\n  \n  // Tier: \"graded X Tier\"\n  const tierMatch = percentagesText.match(/graded ([A-Z][+-]?)\\s*Tier/i);\n  if (tierMatch) {\n    stats.tier = tierMatch[1];\n    console.log('Found Tier:', stats.tier);\n  }\n  \n  // Alternative tier pattern\n  if (stats.tier === 'N/A') {\n    const altTierMatch = percentagesText.match(/\\n([A-Z][+-]?)\\n\\d+%/);\n    if (altTierMatch) {\n      stats.tier = altTierMatch[1];\n      console.log('Found Tier (alt):', stats.tier);\n    }\n  }\n}\n\n// HTMLノードから直接取得できた値があれば優先\nif (htmlNodeData.buildWinRate) {\n  stats.winRate = htmlNodeData.buildWinRate;\n}\nif (htmlNodeData.buildPickRate) {\n  stats.pickRate = htmlNodeData.buildPickRate;\n}\n\n// スターティングアイテムの抽出\nif (percentagesText) {\n  // \"Starting Items\" セクションを探す\n  const startingSection = percentagesText.indexOf('Starting Items');\n  if (startingSection > -1) {\n    const textAfterStarting = percentagesText.substring(startingSection, startingSection + 500); // 次の500文字を取得\n    \n    // 一般的なスターティングアイテム\n    const startingItemsList = [\n      'Health Potion',\n      'Tear of the Goddess',\n      'Faerie Charm',\n      'Rejuvenation Bead',\n      'Spellthief\\'s Edge',\n      'Spectral Sickle',\n      'Relic Shield',\n      'Steel Shoulderguards',\n      'World Atlas',\n      'Runic Compass',\n      'Celestial Opposition',\n      'Solstice Sleigh',\n      'Dream Maker',\n      'Control Ward'\n    ];\n    \n    // スターティングアイテムの勝率とゲーム数を探す\n    // \"Health Potion ... x 2 ... 57.48% Win Rate 2,011 Games\"\n    const startingPattern = /([\\d.]+)%\\s*Win\\s*Rate\\s*([\\\\d,]+)\\s*Games/i;\n    const startingMatch = textAfterStarting.match(startingPattern);\n    \n    if (startingMatch) {\n      const winRate = startingMatch[1] + '%';\n      const games = parseGames(startingMatch[2]);\n      \n      // アイテム名を特定\n      startingItemsList.forEach(itemName => {\n        if (textAfterStarting.includes(itemName)) {\n          // x2などの数量もチェック\n          const quantityMatch = textAfterStarting.match(new RegExp(itemName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '[\\\\s\\\\S]*?x\\\\s*(\\\\d+)', 'i'));\n          const quantity = quantityMatch ? parseInt(quantityMatch[1]) : 1;\n          \n          startingItems.push({\n            name: itemName,\n            quantity: quantity,\n            winRate: winRate,\n            games: games\n          });\n          console.log(`Found starting item: ${itemName} x${quantity} - ${winRate} (${games} games)`);\n        }\n      });\n    }\n  }\n}\n\n// アイテムデータの抽出（勝率とゲーム数を含む）\nif (htmlNodeData.coreBuild && Array.isArray(htmlNodeData.coreBuild)) {\n  items = htmlNodeData.coreBuild.map(name => ({\n    name: name,\n    winRate: 'N/A',\n    games: 0,\n    type: 'core'\n  }));\n  console.log('Found core build items from HTML node:', items.length);\n}\n\n// HTMLノードで取得できなかった場合、percentagesから抽出\nif (percentagesText) {\n  const commonItems = [\n    'Dream Maker',\n    'Moonstone Renewer',\n    'Ionian Boots of Lucidity',\n    'Boots of Swiftness',\n    'Redemption',\n    'Ardent Censer',\n    'Staff of Flowing Water',\n    'Mikael\\'s Blessing',\n    'Shurelya\\'s Battlesong',\n    'Locket of the Iron Solari',\n    'Imperial Mandate',\n    'Echoes of Helia',\n    'Morellonomicon',\n    'Chemtech Putrifier',\n    'Cosmic Drive',\n    'Vigilant Wardstone',\n    'Zhonya\\'s Hourglass',\n    'Banshee\\'s Veil'\n  ];\n  \n  // 既存のアイテムリストがある場合は、その勝率を更新。ない場合は新規作成\n  const existingItems = items.length > 0;\n  if (!existingItems) {\n    items = [];\n  }\n  \n  commonItems.forEach(itemName => {\n    if (percentagesText.includes(itemName)) {\n      const escapedName = itemName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // 複数のパターンを試す\n      const patterns = [\n        // パターン1: Loading...の後に勝率とゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)(?:\\\\s|\\\\n)', 'i'),\n        // パターン2: アイテム名の直後に勝率とゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,100}?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)', 'i'),\n        // パターン3: 勝率のみ\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,50}?(\\\\d+\\\\.\\\\d+)%', 'i')\n      ];\n      \n      let matched = false;\n      for (const pattern of patterns) {\n        const match = percentagesText.match(pattern);\n        if (match) {\n          const winRate = match[1] + '%';\n          const games = match[2] ? parseGames(match[2]) : 0;\n          \n          // 既存のアイテムを更新するか、新規追加\n          const existingItem = items.find(i => i.name === itemName);\n          if (existingItem) {\n            existingItem.winRate = winRate;\n            existingItem.games = games;\n          } else {\n            items.push({\n              name: itemName,\n              winRate: winRate,\n              games: games,\n              type: 'build'\n            });\n          }\n          console.log(`Found item ${itemName}: ${winRate} (${games} games)`);\n          matched = true;\n          break;\n        }\n      }\n      \n      if (!matched && !existingItems) {\n        items.push({\n          name: itemName,\n          winRate: 'N/A',\n          games: 0,\n          type: 'build'\n        });\n        console.log(`Found item ${itemName} but no stats`);\n      }\n    }\n  });\n}\n\n// プライマリールーンの抽出\nif (percentagesText) {\n  const primaryRunesList = [\n    'Summon Aery',\n    'Arcane Comet',\n    'Phase Rush',\n    'Guardian',\n    'Grasp of the Undying',\n    'Aftershock',\n    'Electrocute',\n    'Predator',\n    'Dark Harvest',\n    'Hail of Blades',\n    'Lethal Tempo',\n    'Fleet Footwork',\n    'Conqueror',\n    'Press the Attack',\n    'Glacial Augment',\n    'Unsealed Spellbook',\n    'First Strike'\n  ];\n\n  primaryRunesList.forEach(runeName => {\n    if (percentagesText.includes(runeName)) {\n      const escapedName = runeName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // 複数のパターンを試す\n      const patterns = [\n        // パターン1: Loading...の後、Win Rateとゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%\\\\s*Win\\\\s*Rate[\\\\s\\\\S]{0,30}?([\\\\d,]+)\\\\s*Games', 'i'),\n        // パターン2: 勝率とゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,100}?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)\\\\s*Games', 'i'),\n        // パターン3: 勝率のみ\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,50}?(\\\\d+\\\\.\\\\d+)%', 'i')\n      ];\n      \n      let matched = false;\n      for (const pattern of patterns) {\n        const match = percentagesText.match(pattern);\n        if (match) {\n          const winRate = match[1] + '%';\n          const games = match[2] ? parseGames(match[2]) : 0;\n          primaryRunes.push({\n            name: runeName,\n            winRate: winRate,\n            games: games,\n            type: 'keystone'\n          });\n          console.log(`Found primary rune ${runeName}: ${winRate} (${games} games)`);\n          matched = true;\n          break;\n        }\n      }\n      \n      if (!matched) {\n        primaryRunes.push({\n          name: runeName,\n          winRate: 'N/A',\n          games: 0,\n          type: 'keystone'\n        });\n        console.log(`Found primary rune ${runeName} but no stats`);\n      }\n    }\n  });\n\n  // セカンダリールーンを探す\n  const secondaryRunesList = [\n    'Demolish',\n    'Font of Life',\n    'Shield Bash',\n    'Conditioning',\n    'Second Wind',\n    'Bone Plating',\n    'Overgrowth',\n    'Revitalize',\n    'Unflinching',\n    'Cheap Shot',\n    'Taste of Blood',\n    'Eyeball Collection',\n    'Zombie Ward',\n    'Ghost Poro',\n    'Treasure Hunter',\n    'Ingenious Hunter',\n    'Relentless Hunter',\n    'Ultimate Hunter',\n    'Nullifying Orb',\n    'Manaflow Band',\n    'Nimbus Cloak',\n    'Transcendence',\n    'Celerity',\n    'Absolute Focus',\n    'Scorch',\n    'Waterwalking',\n    'Gathering Storm',\n    'Triumph',\n    'Presence of Mind',\n    'Legend: Alacrity',\n    'Legend: Tenacity',\n    'Legend: Bloodline',\n    'Coup de Grace',\n    'Cut Down',\n    'Last Stand',\n    'Hextech Flashtraption',\n    'Magical Footwear',\n    'Perfect Timing',\n    'Future\\'s Market',\n    'Minion Dematerializer',\n    'Biscuit Delivery',\n    'Cosmic Insight',\n    'Approach Velocity',\n    'Time Warp Tonic'\n  ];\n\n  // Secondaryセクションの後のルーンを優先的に探す\n  const secondarySection = percentagesText.indexOf('Secondary');\n  const textAfterSecondary = secondarySection > -1 ? percentagesText.substring(secondarySection) : percentagesText;\n\n  secondaryRunesList.forEach(runeName => {\n    if (textAfterSecondary.includes(runeName)) {\n      const escapedName = runeName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // セカンダリールーン用のパターン\n      const patterns = [\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)\\\\s*Games', 'i'),\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,50}?(\\\\d+\\\\.\\\\d+)%', 'i')\n      ];\n      \n      let matched = false;\n      for (const pattern of patterns) {\n        const match = textAfterSecondary.match(pattern);\n        if (match) {\n          const winRate = match[1] + '%';\n          const games = match[2] ? parseGames(match[2]) : 0;\n          secondaryRunes.push({\n            name: runeName,\n            winRate: winRate,\n            games: games,\n            type: 'secondary'\n          });\n          console.log(`Found secondary rune ${runeName}: ${winRate} (${games} games)`);\n          matched = true;\n          break;\n        }\n      }\n      \n      if (!matched && textAfterSecondary.includes(runeName)) {\n        secondaryRunes.push({\n          name: runeName,\n          winRate: 'N/A',\n          games: 0,\n          type: 'secondary'\n        });\n        console.log(`Found secondary rune ${runeName} but no stats`);\n      }\n    }\n  });\n}\n\n// 結果のサマリーを生成\nconst summary = {\n  source: 'lolalytics_build',\n  type: 'build_data',\n  findings: {\n    statistics: stats,\n    items: {\n      starting: startingItems,\n      core: items.slice(0, 3),\n      full: items.slice(0, 6)\n    },\n    runes: {\n      keystone: primaryRunes.slice(0, 1),\n      primary: primaryRunes.slice(0, 4),\n      secondary: secondaryRunes.slice(0, 2)\n    },\n    analysis: generateBuildAnalysis()\n  }\n};\n\nfunction generateBuildAnalysis() {\n  let analysis = [];\n  \n  // 統計分析\n  if (stats.winRate !== 'N/A') {\n    const winRateNum = parseFloat(stats.winRate);\n    if (winRateNum > 52) {\n      analysis.push(`High win rate build (${stats.winRate})`);\n    } else if (winRateNum < 48) {\n      analysis.push(`Low win rate build (${stats.winRate})`);\n    } else {\n      analysis.push(`Average win rate build (${stats.winRate})`);\n    }\n  }\n  \n  if (stats.pickRate !== 'N/A') {\n    const pickRateNum = parseFloat(stats.pickRate);\n    if (pickRateNum > 10) {\n      analysis.push(`Popular pick (${stats.pickRate})`);\n    } else if (pickRateNum < 3) {\n      analysis.push(`Niche pick (${stats.pickRate})`);\n    }\n  }\n  \n  if (stats.tier !== 'N/A') {\n    analysis.push(`Tier: ${stats.tier}`);\n  }\n  \n  // スターティングアイテム\n  if (startingItems.length > 0) {\n    const startingNames = startingItems.map(i => `${i.name}${i.quantity > 1 ? ' x' + i.quantity : ''}`).join(', ');\n    analysis.push(`Start: ${startingNames}`);\n  }\n  \n  // ビルド分析\n  if (items.length > 0) {\n    const coreItems = items.slice(0, 3).map(i => i.name).join(', ');\n    analysis.push(`Core: ${coreItems}`);\n  }\n  \n  if (primaryRunes.length > 0 && primaryRunes[0]) {\n    analysis.push(`Keystone: ${primaryRunes[0].name}`);\n  }\n  \n  return analysis.join(' | ') || 'No build data available';\n}\n\nconsole.log('Final build summary:', JSON.stringify(summary, null, 2));\n\nreturn [{ json: summary }];"
+      },
+      "id": "c3fc5d5a-8e89-4fec-9a00-e644b5dc3631",
+      "name": "Parse Research Data_build",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        -144
+      ],
+      "notes": "Parse extracted research data"
+    },
+    {
+      "parameters": {
+        "zone": {
+          "__rl": true,
+          "value": "web_unlocker_lol",
+          "mode": "list",
+          "cachedResultName": "web_unlocker_lol"
+        },
+        "country": {
+          "__rl": true,
+          "mode": "list",
+          "value": "us"
+        },
+        "url": "={{ $json.url2 }}",
+        "requestOptions": {}
+      },
+      "type": "@brightdata/n8n-nodes-brightdata.brightData",
+      "typeVersion": 1,
+      "position": [
+        -800,
+        -144
+      ],
+      "id": "7b075329-0507-425f-a088-3a1d7bd50431",
+      "name": "BrightData Research_Bulid",
+      "credentials": {
+        "brightdataApi": {
+          "id": "wNwKLsIIuZMGu8dD",
+          "name": "BrightData account"
+        }
+      },
+      "notes": "Scrapes tier-specific meta data from League of Graphs using BrightData"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -224,
+        -224
+      ],
+      "id": "859baec0-7a7c-442e-8fac-1076c4299370",
+      "name": "Merge HTML"
+    },
+    {
+      "parameters": {
+        "zone": {
+          "__rl": true,
+          "value": "web_unlocker_lol",
+          "mode": "list",
+          "cachedResultName": "web_unlocker_lol"
+        },
+        "country": {
+          "__rl": true,
+          "mode": "list",
+          "value": "us"
+        },
+        "url": "={{ $json.url1 }}",
+        "requestOptions": {}
+      },
+      "type": "@brightdata/n8n-nodes-brightdata.brightData",
+      "typeVersion": 1,
+      "position": [
+        -800,
+        -320
+      ],
+      "id": "3ed6449d-a537-4313-9231-f88f1ece27dc",
+      "name": "BrightData Research vs",
+      "credentials": {
+        "brightdataApi": {
+          "id": "wNwKLsIIuZMGu8dD",
+          "name": "BrightData account"
+        }
+      },
+      "notes": "Scrapes tier-specific meta data from League of Graphs using BrightData"
+    },
+    {
+      "parameters": {
+        "jsCode": "// BrightDataの出力をHTML抽出用にフォーマット（url1用）\n// Format BrightData Queryからのメタデータも含める\n\n// Format BrightData Queryからのデータを取得\nconst queryData = $node[\"Format BrightData Query\"].json || {};\nconst originalData = queryData.originalData || {};\n\n// BrightDataノードからのHTML出力を取得\nconst items = $input.all();\nconst formattedItems = [];\n\nitems.forEach(item => {\n  const scraperOutput = item.json;\n  \n  // HTMLコンテンツを取得（BrightDataは直接文字列として返すことがある）\n  let html = '';\n  if (typeof scraperOutput === 'string') {\n    html = scraperOutput;\n  } else if (scraperOutput.html) {\n    html = scraperOutput.html;\n  } else if (scraperOutput.content) {\n    html = scraperOutput.content;\n  } else if (scraperOutput.body) {\n    html = scraperOutput.body;\n  } else if (Array.isArray(scraperOutput) && scraperOutput.length > 0) {\n    // 配列の場合は最初の要素を使用\n    html = scraperOutput[0];\n  } else {\n    // オブジェクト全体が返された場合\n    html = JSON.stringify(scraperOutput);\n  }\n  \n  // url1用のメタデータを使用\n  formattedItems.push({\n    json: {\n      htmlContent: html,\n      url: queryData.url1 || '',\n      type: queryData.type1 || 'matchup_data',\n      description: queryData.description1 || '',\n      champion: originalData.champion || '',\n      role: originalData.role || '',\n      patch: originalData.patch || '',\n      currentTier: originalData.currentTier || '',\n      nextTier: originalData.nextTier || '',\n      originalData: originalData\n    }\n  });\n});\n\nreturn formattedItems;"
+      },
+      "id": "bcaef3f1-dbbc-4929-9ff1-dc751818f6f6",
+      "name": "Format Research HTML vs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        -320
+      ],
+      "notes": "Format BrightData output for HTML extraction"
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "dataPropertyName": "htmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "vsWinRate",
+              "cssSelector": ".win-rate-vs, [data-vs-win-rate], .matchup-stats .win-rate, .champion-win-rate"
+            },
+            {
+              "key": "vsPickRate",
+              "cssSelector": ".pick-rate-vs, [data-vs-pick-rate], .matchup-stats .pick-rate, .champion-pick-rate"
+            },
+            {
+              "key": "counters",
+              "cssSelector": ".counter-champion .champion-name, .weak-against .champion-name, .counter-list .champion, [data-counter-champion]",
+              "returnArray": true
+            },
+            {
+              "key": "strongAgainst",
+              "cssSelector": ".strong-against .champion-name, .good-against .champion-name, .easy-matchup .champion, [data-strong-against]",
+              "returnArray": true
+            },
+            {
+              "key": "matchupWinRates",
+              "cssSelector": ".matchup-win-rate, .vs-win-rate, [data-matchup-win-rate]",
+              "returnArray": true
+            },
+            {
+              "key": "percentages",
+              "cssSelector": "span:contains('%'), div:contains('%')",
+              "returnArray": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e9766344-5c19-4f0e-9166-90cc1f9c7252",
+      "name": "Extract Research Stats vs",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        -512,
+        -320
+      ],
+      "notes": "Extract stats from research HTML"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Research Data vs - LoLalytics VS matchup data parser\n// HTMLノードからの出力を処理し、AI用のサマリーを生成\n\nconst htmlNodeData = $json;\nconst percentagesText = htmlNodeData.percentages?.join('\\n') || '';\n\n// デバッグ用\nconsole.log('=== Parse Research Data vs ===');\nconsole.log('HTML Node data keys:', Object.keys(htmlNodeData));\nconsole.log('percentages length:', htmlNodeData.percentages?.length || 0);\n\n// ゲーム数をパースする関数\nfunction parseGames(gamesStr) {\n  if (!gamesStr) return 0;\n  return parseInt(gamesStr.toString().replace(/,/g, '')) || 0;\n}\n\n// デフォルト値\nlet vsWinRate = 'N/A';\nlet counters = [];\nlet strongAgainst = [];\nlet vsStats = {};\n\n// percentagesテキストからVS勝率を抽出\nif (percentagesText) {\n  // VS Win Rate: \"53.24%\" パターン（Lulu vs Yuumiの例）\n  const vsWinRateMatch = percentagesText.match(/(\\d+\\.\\d+)%\\s*Win Rate/);\n  if (vsWinRateMatch) {\n    vsWinRate = vsWinRateMatch[1] + '%';\n    console.log('Found VS Win Rate:', vsWinRate);\n  }\n\n  // 別のパターン: \"wins against ... X% of the time\"\n  const winsAgainstMatch = percentagesText.match(/wins against.*?(\\d+\\.\\d+)%\\s*of the time/i);\n  if (winsAgainstMatch && vsWinRate === 'N/A') {\n    vsWinRate = winsAgainstMatch[1] + '%';\n    console.log('Found VS Win Rate (alternative):', vsWinRate);\n  }\n\n  // チャンピオン名を抽出（VS対戦相手）\n  const vsChampionMatch = percentagesText.match(/vs\\s+([A-Z][a-z]+)/);\n  const vsChampion = vsChampionMatch ? vsChampionMatch[1] : 'Unknown';\n\n  // ゲーム数を抽出\n  const gamesMatch = percentagesText.match(/(\\d+,?\\d*)\\s*Games/);\n  const games = gamesMatch ? gamesMatch[1].replace(',', '') : '0';\n\n  // スキル優先度の勝率を抽出\n  const skillWinRateMatch = percentagesText.match(/(\\d+\\.\\d+)%\\s*Win Rate\\s*\\d+\\s*Games/);\n  \n  vsStats = {\n    vsChampion: vsChampion,\n    winRate: vsWinRate,\n    games: parseInt(games) || 0,\n    analysis: `${vsWinRate} win rate against ${vsChampion} (${games} games)`\n  };\n}\n\n// HTMLノードから直接取得したカウンターとstrongAgainstデータを使用\nif (htmlNodeData.counters && Array.isArray(htmlNodeData.counters)) {\n  counters = htmlNodeData.counters.map(champion => ({\n    champion: champion,\n    winRate: 'N/A',\n    type: 'counter'\n  }));\n  console.log('Found counters:', counters.length);\n}\n\nif (htmlNodeData.strongAgainst && Array.isArray(htmlNodeData.strongAgainst)) {\n  strongAgainst = htmlNodeData.strongAgainst.map(champion => ({\n    champion: champion,\n    winRate: 'N/A',\n    type: 'strong_against'\n  }));\n  console.log('Found strong against:', strongAgainst.length);\n}\n\n// アイテムとルーンの処理（VSページにも表示される）\nlet items = [];\nlet primaryRunes = [];\nlet secondaryRunes = [];\n\nif (percentagesText) {\n  // コアアイテムを探す（勝率とゲーム数を含む）\n  const commonItems = [\n    'Dream Maker',\n    'Moonstone Renewer',\n    'Ionian Boots of Lucidity',\n    'Boots of Swiftness',\n    'Redemption',\n    'Ardent Censer',\n    'Staff of Flowing Water',\n    'Mikael\\'s Blessing',\n    'Shurelya\\'s Battlesong',\n    'Locket of the Iron Solari',\n    'Morellonomicon',\n    'Imperial Mandate',\n    'Echoes of Helia'\n  ];\n\n  commonItems.forEach(itemName => {\n    if (percentagesText.includes(itemName)) {\n      const escapedName = itemName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // 複数のパターンを試す\n      const patterns = [\n        // パターン1: Loading...の後に勝率とゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)(?:\\\\s|\\\\n)', 'i'),\n        // パターン2: アイテム名の直後に勝率とゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,100}?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)', 'i'),\n        // パターン3: 勝率のみ\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,50}?(\\\\d+\\\\.\\\\d+)%', 'i')\n      ];\n      \n      let matched = false;\n      for (const pattern of patterns) {\n        const match = percentagesText.match(pattern);\n        if (match) {\n          const winRate = match[1] + '%';\n          const games = match[2] ? parseGames(match[2]) : 0;\n          items.push({\n            name: itemName,\n            winRate: winRate,\n            games: games\n          });\n          console.log(`Found item ${itemName}: ${winRate} (${games} games)`);\n          matched = true;\n          break;\n        }\n      }\n      \n      if (!matched) {\n        items.push({\n          name: itemName,\n          winRate: 'N/A',\n          games: 0\n        });\n        console.log(`Found item ${itemName} but no stats`);\n      }\n    }\n  });\n\n  // プライマリールーンを探す\n  const primaryRunesList = [\n    'Summon Aery',\n    'Arcane Comet',\n    'Phase Rush',\n    'Guardian',\n    'Grasp of the Undying',\n    'Aftershock',\n    'Electrocute',\n    'Dark Harvest',\n    'Hail of Blades',\n    'Lethal Tempo',\n    'Fleet Footwork',\n    'Conqueror',\n    'Press the Attack',\n    'Glacial Augment',\n    'Unsealed Spellbook',\n    'First Strike'\n  ];\n\n  primaryRunesList.forEach(runeName => {\n    if (percentagesText.includes(runeName)) {\n      const escapedName = runeName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // 複数のパターンを試す\n      const patterns = [\n        // パターン1: Loading...の後、Win Rateとゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%\\\\s*Win\\\\s*Rate[\\\\s\\\\S]{0,30}?([\\\\d,]+)\\\\s*Games', 'i'),\n        // パターン2: 勝率とゲーム数\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,100}?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)\\\\s*Games', 'i'),\n        // パターン3: 勝率のみ\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,50}?(\\\\d+\\\\.\\\\d+)%', 'i')\n      ];\n      \n      let matched = false;\n      for (const pattern of patterns) {\n        const match = percentagesText.match(pattern);\n        if (match) {\n          const winRate = match[1] + '%';\n          const games = match[2] ? parseGames(match[2]) : 0;\n          primaryRunes.push({\n            name: runeName,\n            winRate: winRate,\n            games: games,\n            type: 'primary'\n          });\n          console.log(`Found primary rune ${runeName}: ${winRate} (${games} games)`);\n          matched = true;\n          break;\n        }\n      }\n      \n      if (!matched) {\n        primaryRunes.push({\n          name: runeName,\n          winRate: 'N/A',\n          games: 0,\n          type: 'primary'\n        });\n        console.log(`Found primary rune ${runeName} but no stats`);\n      }\n    }\n  });\n\n  // セカンダリールーンを探す\n  const secondaryRunesList = [\n    'Demolish',\n    'Font of Life',\n    'Shield Bash',\n    'Conditioning',\n    'Second Wind',\n    'Bone Plating',\n    'Overgrowth',\n    'Revitalize',\n    'Unflinching',\n    'Cheap Shot',\n    'Taste of Blood',\n    'Eyeball Collection',\n    'Zombie Ward',\n    'Ghost Poro',\n    'Treasure Hunter',\n    'Ingenious Hunter',\n    'Relentless Hunter',\n    'Ultimate Hunter',\n    'Nullifying Orb',\n    'Manaflow Band',\n    'Nimbus Cloak',\n    'Transcendence',\n    'Celerity',\n    'Absolute Focus',\n    'Scorch',\n    'Waterwalking',\n    'Gathering Storm',\n    'Triumph',\n    'Presence of Mind',\n    'Legend: Alacrity',\n    'Legend: Tenacity',\n    'Legend: Bloodline',\n    'Coup de Grace',\n    'Cut Down',\n    'Last Stand',\n    'Hextech Flashtraption',\n    'Magical Footwear',\n    'Perfect Timing',\n    'Future\\'s Market',\n    'Minion Dematerializer',\n    'Biscuit Delivery',\n    'Cosmic Insight',\n    'Approach Velocity',\n    'Time Warp Tonic'\n  ];\n\n  // Secondaryセクションの後のルーンを優先的に探す\n  const secondarySection = percentagesText.indexOf('Secondary');\n  const textAfterSecondary = secondarySection > -1 ? percentagesText.substring(secondarySection) : percentagesText;\n\n  secondaryRunesList.forEach(runeName => {\n    if (textAfterSecondary.includes(runeName)) {\n      const escapedName = runeName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n      \n      // セカンダリールーン用のパターン\n      const patterns = [\n        new RegExp(escapedName + '[\\\\s\\\\S]*?Loading\\\\.\\\\.\\\\.[\\\\s\\\\S]*?(\\\\d+\\\\.\\\\d+)%[\\\\s\\\\S]{0,30}?([\\\\d,]+)\\\\s*Games', 'i'),\n        new RegExp(escapedName + '[\\\\s\\\\S]{0,50}?(\\\\d+\\\\.\\\\d+)%', 'i')\n      ];\n      \n      let matched = false;\n      for (const pattern of patterns) {\n        const match = textAfterSecondary.match(pattern);\n        if (match) {\n          const winRate = match[1] + '%';\n          const games = match[2] ? parseGames(match[2]) : 0;\n          secondaryRunes.push({\n            name: runeName,\n            winRate: winRate,\n            games: games,\n            type: 'secondary'\n          });\n          console.log(`Found secondary rune ${runeName}: ${winRate} (${games} games)`);\n          matched = true;\n          break;\n        }\n      }\n      \n      if (!matched && textAfterSecondary.includes(runeName)) {\n        secondaryRunes.push({\n          name: runeName,\n          winRate: 'N/A',\n          games: 0,\n          type: 'secondary'\n        });\n        console.log(`Found secondary rune ${runeName} but no stats`);\n      }\n    }\n  });\n}\n\n// 全てのルーンを統合\nconst allRunes = [...primaryRunes.slice(0, 4), ...secondaryRunes.slice(0, 2)];\n\n// 結果のサマリーを生成\nconst summary = {\n  source: 'lolalytics_vs',\n  type: 'matchup_data',\n  findings: {\n    matchup: vsStats,\n    counters: counters.slice(0, 5),\n    strongAgainst: strongAgainst.slice(0, 5),\n    items: items.slice(0, 6),\n    runes: {\n      primary: primaryRunes.slice(0, 4),\n      secondary: secondaryRunes.slice(0, 2),\n      all: allRunes\n    },\n    analysis: generateAnalysis()\n  }\n};\n\nfunction generateAnalysis() {\n  let analysis = [];\n  \n  if (vsWinRate !== 'N/A') {\n    const winRateNum = parseFloat(vsWinRate);\n    if (winRateNum > 55) {\n      analysis.push(`Strong advantage (${vsWinRate})`);\n    } else if (winRateNum > 52) {\n      analysis.push(`Favorable matchup (${vsWinRate})`);\n    } else if (winRateNum < 48) {\n      analysis.push(`Difficult matchup (${vsWinRate})`);\n    } else {\n      analysis.push(`Even matchup (${vsWinRate})`);\n    }\n  }\n  \n  if (counters.length > 0) {\n    analysis.push(`Countered by: ${counters.slice(0, 3).map(c => c.champion).join(', ')}`);\n  }\n  \n  if (strongAgainst.length > 0) {\n    analysis.push(`Strong against: ${strongAgainst.slice(0, 3).map(s => s.champion).join(', ')}`);\n  }\n  \n  return analysis.join(' | ') || 'No matchup data available';\n}\n\nconsole.log('Final VS summary:', JSON.stringify(summary, null, 2));\n\nreturn [{ json: summary }];"
+      },
+      "id": "2a2bb5b9-0b1c-4275-a454-abf0f271c694",
+      "name": "Parse Research Data vs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        -320
+      ],
+      "notes": "Parse extracted research data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build comprehensive RAG context from all data sources\nconst items = $input.all();\n\n// Find LoLalytics data by source type\nconst lolalyticsBuildData = items.find(item => item.json.source === 'lolalytics_build') || {};\nconst lolalyticvsData = items.find(item => item.json.source === 'lolalytics_vs') || {};\n\n// Find item with chatInput (merged data from previous nodes)\nconst mergedData = items.find(item => item.json.chatInput) || {};\n\n// Legacy: Find by tierType for backward compatibility\nconst currentTierData = items.find(item => item.json.tierType === 'current') || lolalyticsBuildData;\nconst nextTierData = items.find(item => item.json.tierType === 'next') || {};\n\n// Find database data\nconst metaData = items.filter(item => item.json.champion_name) || [];\nconst fourteenMinData = items.find(item => item.json.match_id) || {};\n\n// Extract baseData from available sources - prioritize merged data\nconst baseData = {\n  summonerName: mergedData.json?.summonerName || 'Hikarukk',  // webhookから送られるはずの値\n  champion: mergedData.json?.champion || currentTierData.json?.champion || 'Lulu',\n  role: mergedData.json?.role || currentTierData.json?.role || 'UTILITY',\n  currentTier: mergedData.json?.currentTier || currentTierData.json?.tier || 'SILVER',  // tierType: \"current\"のデータから取得\n  nextTier: mergedData.json?.nextTier || nextTierData.json?.tier || 'GOLD',\n  division: mergedData.json?.division || 'IV',\n  language: mergedData.json?.language || 'japanese',\n  locale: mergedData.json?.locale || 'jp',\n  matchId: mergedData.json?.matchId || fourteenMinData.json?.match_id || 'JP1_522825775',\n  cache_key: mergedData.json?.cache_key || '14coacher_Hikarukk_JP1_522825775'\n};\n\n// Extract player-specific data from 14-min analysis\nlet playerAnalysis = {};\nif (fourteenMinData.json?.participants) {\n  // Find the target player - championNameを優先\n  const targetPlayer = fourteenMinData.json.participants.find(\n    p => p.championName === baseData.champion\n  ) || fourteenMinData.json.participants.find(\n    p => p.individualPosition === baseData.role\n  );\n  \n  if (targetPlayer) {\n    playerAnalysis = {\n      cs_at_14: targetPlayer.cs,\n      gold_at_14: targetPlayer.totalGold,\n      level_at_14: targetPlayer.level,\n      csEfficiency: targetPlayer.csEfficiency,\n      goldPerMinute: Math.round(targetPlayer.goldPerMinute * 10) / 10, // 小数点第1位まで\n      wardsPlaced: targetPlayer.wardsPlaced,\n      killParticipation: targetPlayer.killParticipation,\n      objectiveParticipation: targetPlayer.objectiveParticipation || 0,\n      teamId: targetPlayer.teamId // チームIDを保持\n    };\n  }\n}\n\n// Extract team compositions from match data\nlet allyTeam = [];\nlet enemyTeam = [];\nlet laneOpponent = 'Unknown';\n\nif (fourteenMinData.json?.participants && playerAnalysis.teamId) {\n  const allParticipants = fourteenMinData.json.participants;\n  \n  // Get ally and enemy teams\n  allyTeam = allParticipants\n    .filter(p => p.teamId === playerAnalysis.teamId)\n    .map(p => ({\n      champion: p.championName,\n      role: p.individualPosition || p.teamPosition\n    }));\n  \n  enemyTeam = allParticipants\n    .filter(p => p.teamId !== playerAnalysis.teamId)\n    .map(p => ({\n      champion: p.championName,\n      role: p.individualPosition || p.teamPosition\n    }));\n  \n  // Find lane opponent for Support/ADC\n  if (baseData.role === 'UTILITY' || baseData.role === 'SUPPORT') {\n    const enemyBot = enemyTeam.filter(p => p.role === 'BOTTOM' || p.role === 'UTILITY');\n    laneOpponent = enemyBot.map(p => p.champion).join(' & ') || 'Unknown';\n  } else if (baseData.role === 'BOTTOM') {\n    const enemyBot = enemyTeam.filter(p => p.role === 'BOTTOM' || p.role === 'UTILITY');\n    laneOpponent = enemyBot.map(p => p.champion).join(' & ') || 'Unknown';\n  } else {\n    const enemyLaner = enemyTeam.find(p => p.role === baseData.role);\n    laneOpponent = enemyLaner?.champion || 'Unknown';\n  }\n}\n\n// Build simplified context for AI Agent\nconst context = {\n  player: {\n    summonerName: baseData.summonerName,\n    currentTier: baseData.currentTier,\n    nextTier: baseData.nextTier,\n    division: baseData.division,\n    champion: baseData.champion,\n    role: baseData.role,\n    language: baseData.language\n  },\n  matchContext: {\n    allyTeam: allyTeam.map(p => p.champion).join(', ') || 'Unknown',\n    enemyTeam: enemyTeam.map(p => p.champion).join(', ') || 'Unknown',\n    laneOpponent: laneOpponent\n  },\n  currentTierMeta: {\n    // Use LoLalytics build data if available, otherwise fall back to legacy\n    items: lolalyticsBuildData.json?.findings?.items?.full?.slice(0, 6).map(i => i.name) || \n           currentTierData.json?.items?.slice(0, 6).map(i => i.name) || [],\n    keystone: lolalyticsBuildData.json?.findings?.runes?.keystone?.[0]?.name || \n              currentTierData.json?.runes?.[0]?.name || 'Unknown',\n    secondaryRune: lolalyticsBuildData.json?.findings?.runes?.secondary?.[0]?.name || \n                   currentTierData.json?.runes?.[4]?.name || 'Unknown',\n    winRate: lolalyticsBuildData.json?.findings?.statistics?.winRate || \n             currentTierData.json?.stats?.winRate || 'N/A',\n    pickRate: lolalyticsBuildData.json?.findings?.statistics?.pickRate || \n              currentTierData.json?.stats?.pickRate || 'N/A'\n  },\n  nextTierMeta: {\n    items: nextTierData.json?.items?.slice(0, 6).map(i => i.name) || [],\n    keystone: nextTierData.json?.runes?.[0]?.name || 'Unknown',\n    winRate: nextTierData.json?.stats?.winRate || 'N/A'\n  },\n  gameAnalysis: {\n    ...playerAnalysis,\n    // チーム100視点のgoldDiffをプレイヤーのチーム視点に変換\n    teamGoldDiff: playerAnalysis.teamId === 200 ? \n      -(fourteenMinData.json?.gold_diff || 0) : // 赤チーム(200)なら符号反転\n      (fourteenMinData.json?.gold_diff || 0),   // 青チーム(100)ならそのまま\n    // winPredictionもチーム視点で調整\n    winPrediction: playerAnalysis.teamId === 200 ? \n      100 - parseFloat(fourteenMinData.json?.win_prediction || 50) : // 赤チームなら100から引く\n      parseFloat(fourteenMinData.json?.win_prediction || 50),        // 青チームならそのまま\n    gameOutcome: playerAnalysis.teamId && fourteenMinData.json?.actual_winner === playerAnalysis.teamId ? 'win' : 'loss'\n  },\n  insights: fourteenMinData.json?.insights?.filter(i => \n    i.championName === baseData.champion || i.type === 'goldLead'\n  ) || []\n};\n\n// Extract Dataからベンチマークと実際のパフォーマンスを取得\nconst extractData = items.find(item => item.json.language && item.json.summonerName);\nconst benchmarks = extractData?.json?.benchmarks || {};\nconst actualPerformance = extractData?.json?.actual_performance || {};\n\n// 必要な変数を定義\nconst summonerName = baseData.summonerName;\nconst champion = baseData.champion;\nconst patch = mergedData.json?.patch || extractData?.json?.patch || '15.14';\nconst language = baseData.language;\n\n// 高レート（Diamond+）のベンチマークスコア - フロントエンドと完全一致\nconst highRateBenchmark = {\n  TOP: { cs_14: 119, gold_14: 5200, level_14: 9 },\n  JUNGLE: { cs_14: 88, gold_14: 4800, level_14: 8 },\n  MIDDLE: { cs_14: 133, gold_14: 5400, level_14: 9 },\n  BOTTOM: { cs_14: 133, gold_14: 5500, level_14: 9 },\n  UTILITY: { cs_14: 24, gold_14: 3800, level_14: 8 },\n  SUPPORT: { cs_14: 24, gold_14: 3800, level_14: 8 }\n};\n\n// If merged data already has chatInput AND no LoLalytics data, use it directly\n// Otherwise regenerate to include LoLalytics data\nif (mergedData.json?.chatInput && \n    !lolalyticsBuildData.json?.findings && \n    !lolalyticvsData.json?.findings) {\n  return {\n    json: mergedData.json\n  };\n}\n\n// Generate champion-specific analysis prompt with meta requirements\nlet championPrompt = '';\nconst roleOriginal = baseData.role; // 元の値を保持（UTILITY, SUPPORT等の判定用）\nif (language === 'japanese') {\n  championPrompt = `\n【重要】必ず最新のパッチ${patch}の情報を基に分析してください。\n\n分析項目：\n1. ${champion}のパッチ${patch}での変更点、強み・弱み、パワースパイクタイミング\n2. ${roleOriginal}ポジションでの${champion}固有のコンボ、スキル回しとメカニクス\n3. ${champion}の最適なワードポジションとローミングタイミング\n   ${roleOriginal === 'BOTTOM' ? '4. サポートとのシナジーとレーン管理方法' : ''}\n   ${roleOriginal === 'UTILITY' ? '4. ADCとのシナジーとレーン管理方法' : ''}\n5. 高レート（Diamond+）のベンチマーク達成への段階的改善方法\n\n【メタ要件】\n- 現在のパッチ${patch}における${champion}のティア評価とその理由\n- 推奨ルーン（キーストーン、サブルーン）と勝率\n- コアビルドパスと状況別アイテム選択\n- 強い/弱い対面チャンピオンとその対策\n\n【LoLalyticsデータ分析】\n${lolalyticvsData.json?.findings?.matchup?.vsChampion ? \n`- 対${lolalyticvsData.json.findings.matchup.vsChampion}勝率: ${lolalyticvsData.json.findings.matchup.winRate} (${lolalyticvsData.json.findings.matchup.games}試合)` : ''}\n${lolalyticsBuildData.json?.findings?.statistics ? \n`- 全体統計: 勝率${lolalyticsBuildData.json.findings.statistics.winRate}, ピック率${lolalyticsBuildData.json.findings.statistics.pickRate}, ティア${lolalyticsBuildData.json.findings.statistics.tier}` : ''}\n${lolalyticvsData.json?.findings?.items?.length > 0 ? \n`- 対面推奨ビルド:\n${lolalyticvsData.json.findings.items.slice(0, 3).map(item => \n  `  * ${item.name}: ${item.winRate}勝率 (${item.games}試合)`).join('\\n')}` : \nlolalyticsBuildData.json?.findings?.items?.full?.length > 0 ?\n`- 推奨ビルド:\n${lolalyticsBuildData.json.findings.items.full.slice(0, 3).map(item => \n  `  * ${item.name}: ${item.winRate}勝率 (${item.games}試合)`).join('\\n')}` : ''}\n${lolalyticsBuildData.json?.findings?.runes?.keystone?.[0] ? \n`- キーストーン: ${lolalyticsBuildData.json.findings.runes.keystone[0].name} ${lolalyticsBuildData.json.findings.runes.keystone[0].winRate}勝率 (${lolalyticsBuildData.json.findings.runes.keystone[0].games}試合)` : ''}\n${lolalyticsBuildData.json?.findings?.runes?.secondary?.length > 0 ? \n`- セカンダリールーン: ${lolalyticsBuildData.json.findings.runes.secondary.map(r => r.name).join(', ')}` : ''}`;\n} else if (language === 'korean') {\n  championPrompt = `\n【중요】반드시 최신 패치 ${patch}의 정보를 바탕으로 분석해주세요.\n\n분석 항목:\n1. ${champion}의 패치 ${patch}에서의 변경점, 강점・약점, 파워 스파이크 타이밍\n2. ${roleOriginal} 포지션에서의 ${champion} 고유 콤보, 스킬 사용법과 메커니즘\n3. ${champion}의 최적 와드 위치와 로밍 타이밍\n   ${roleOriginal === 'BOTTOM' ? '4. 서포터와의 시너지와 라인 관리 방법' : ''}\n   ${roleOriginal === 'UTILITY' ? '4. ADC와의 시너지와 라인 관리 방법' : ''}\n5. 고랭크(다이아몬드+) 벤치마크 달성을 위한 단계별 개선 방법\n\n【메타 요구사항】\n- 현재 패치 ${patch}에서 ${champion}의 티어 평가와 이유\n- 추천 룬(키스톤, 서브룬)과 승률\n- 코어 빌드 경로와 상황별 아이템 선택\n- 강한/약한 상대 챔피언과 대응 방법\n\n【LoLalytics 데이터 분석】\n${lolalyticvsData.json?.findings?.matchup?.vsChampion ? \n`- 대 ${lolalyticvsData.json.findings.matchup.vsChampion} 승률: ${lolalyticvsData.json.findings.matchup.winRate} (${lolalyticvsData.json.findings.matchup.games}게임)` : ''}\n${lolalyticsBuildData.json?.findings?.statistics ? \n`- 전체 통계: 승률 ${lolalyticsBuildData.json.findings.statistics.winRate}, 픽률 ${lolalyticsBuildData.json.findings.statistics.pickRate}, 티어 ${lolalyticsBuildData.json.findings.statistics.tier}` : ''}\n${lolalyticvsData.json?.findings?.items?.length > 0 ? \n`- 상대 추천 빌드:\n${lolalyticvsData.json.findings.items.slice(0, 3).map(item => \n  `  * ${item.name}: ${item.winRate} 승률 (${item.games}게임)`).join('\\n')}` : \nlolalyticsBuildData.json?.findings?.items?.full?.length > 0 ?\n`- 추천 빌드:\n${lolalyticsBuildData.json.findings.items.full.slice(0, 3).map(item => \n  `  * ${item.name}: ${item.winRate} 승률 (${item.games}게임)`).join('\\n')}` : ''}\n${lolalyticsBuildData.json?.findings?.runes?.keystone?.[0] ? \n`- 키스톤: ${lolalyticsBuildData.json.findings.runes.keystone[0].name} ${lolalyticsBuildData.json.findings.runes.keystone[0].winRate} 승률 (${lolalyticsBuildData.json.findings.runes.keystone[0].games}게임)` : ''}\n${lolalyticsBuildData.json?.findings?.runes?.secondary?.length > 0 ? \n`- 서브 룬: ${lolalyticsBuildData.json.findings.runes.secondary.map(r => r.name).join(', ')}` : ''}`;\n} else {\n  championPrompt = `\n【IMPORTANT】Analyze based on the latest patch ${patch} information.\n\nAnalysis items:\n1. ${champion}'s patch ${patch} changes, strengths/weaknesses, power spike timings\n2. ${roleOriginal} position-specific ${champion} combos, skill rotations and mechanics\n3. ${champion}'s optimal ward positions and roaming timings\n   ${roleOriginal === 'BOTTOM' ? '4. Synergy with support and lane management methods' : ''}\n   ${roleOriginal === 'UTILITY' ? '4. Synergy with ADC and lane management methods' : ''}\n5. Step-by-step improvement methods to achieve high-rank (Diamond+) benchmarks\n\n【Meta Requirements】\n- ${champion}'s tier rating in current patch ${patch} and reasoning\n- Recommended runes (keystone, secondary) and win rates\n- Core build path and situational item choices\n- Strong/weak matchups and counter strategies\n\n【LoLalytics Data Analysis】\n${lolalyticvsData.json?.findings?.matchup?.vsChampion ? \n`- vs ${lolalyticvsData.json.findings.matchup.vsChampion} Win Rate: ${lolalyticvsData.json.findings.matchup.winRate} (${lolalyticvsData.json.findings.matchup.games} games)` : ''}\n${lolalyticsBuildData.json?.findings?.statistics ? \n`- Overall Stats: ${lolalyticsBuildData.json.findings.statistics.winRate} Win Rate, ${lolalyticsBuildData.json.findings.statistics.pickRate} Pick Rate, Tier ${lolalyticsBuildData.json.findings.statistics.tier}` : ''}\n${lolalyticvsData.json?.findings?.items?.length > 0 ? \n`- Matchup Build:\n${lolalyticvsData.json.findings.items.slice(0, 3).map(item => \n  `  * ${item.name}: ${item.winRate} Win Rate (${item.games} games)`).join('\\n')}` : \nlolalyticsBuildData.json?.findings?.items?.full?.length > 0 ?\n`- Recommended Build:\n${lolalyticsBuildData.json.findings.items.full.slice(0, 3).map(item => \n  `  * ${item.name}: ${item.winRate} Win Rate (${item.games} games)`).join('\\n')}` : ''}\n${lolalyticsBuildData.json?.findings?.runes?.keystone?.[0] ? \n`- Keystone: ${lolalyticsBuildData.json.findings.runes.keystone[0].name} ${lolalyticsBuildData.json.findings.runes.keystone[0].winRate} Win Rate (${lolalyticsBuildData.json.findings.runes.keystone[0].games} games)` : ''}\n${lolalyticsBuildData.json?.findings?.runes?.secondary?.length > 0 ? \n`- Secondary Runes: ${lolalyticsBuildData.json.findings.runes.secondary.map(r => r.name).join(', ')}` : ''}`;\n}\n\n// ランクに応じた目標係数\nconst tierCoefficients = {\n  IRON: 0.4,      // 高レートの40%を目標\n  BRONZE: 0.5,    // 50%\n  SILVER: 0.6,    // 60%\n  GOLD: 0.7,      // 70%\n  PLATINUM: 0.8,  // 80%\n  EMERALD: 0.85,  // 85%\n  DIAMOND: 0.9,   // 90%\n  MASTER: 0.95,   // 95%\n  GRANDMASTER: 1.0,  // 100%\n  CHALLENGER: 1.05   // 105%\n};\n\n// 役割とティアに基づいてベンチマークと推奨事項を計算\nconst role = baseData.role?.toUpperCase() || 'MIDDLE';\nconst currentTier = baseData.currentTier?.toUpperCase() || 'SILVER';\nconst coefficient = tierCoefficients[currentTier] || 0.6;\n\n// ベンチマーク値の計算\nconst benchmarkRole = highRateBenchmark[role] || highRateBenchmark.MIDDLE;\nconst csGoal = Math.round(benchmarkRole.cs_14 * coefficient);\nconst goldGoal = Math.round(benchmarkRole.gold_14 * coefficient);\n\n// 実際のパフォーマンスデータ - mergedDataを優先\nconst actualCs = mergedData.json?.coachingContext?.gameAnalysis?.cs_at_14 || \n                  context.gameAnalysis.cs_at_14 || \n                  actualPerformance.cs_at_14 || 0;\nconst actualGold = mergedData.json?.coachingContext?.gameAnalysis?.gold_at_14 || \n                   context.gameAnalysis.gold_at_14 || \n                   actualPerformance.gold_at_14 || 0;\nconst actualWards = mergedData.json?.coachingContext?.gameAnalysis?.wardsPlaced || \n                    context.gameAnalysis.wardsPlaced || 0;\n\n// 言語別プロンプトを生成（chatInput用）\nconst promptTemplates = {\n  japanese: `あなたはLoLのプロコーチです。最新パッチ${patch}における${champion}（${roleOriginal}）の詳細な分析を行ってください。\n\n${championPrompt}\n\n## 試合コンテキスト\n- 味方チーム: ${mergedData.json?.coachingContext?.matchContext?.allyTeam || context.matchContext.allyTeam}\n- 敵チーム: ${mergedData.json?.coachingContext?.matchContext?.enemyTeam || context.matchContext.enemyTeam}\n- レーン対面: ${mergedData.json?.coachingContext?.matchContext?.laneOpponent || context.matchContext.laneOpponent}\n\n## 分析項目\n1. ${champion}のパッチ${patch}での最新メタ（ルーン、ビルド、プレイスタイル）\n2. 対面${mergedData.json?.coachingContext?.matchContext?.laneOpponent || context.matchContext.laneOpponent}とのマッチアップ詳細\n${role === 'JUNGLE' ? \n  `3. 具体的なジャングルパス（例: Red→Krugs→Raptors→Wolves→Blue→Gromp by 3:30）\n   4. 敵ジャングラーを考慮したスカトル優先度とGankタイミング（3:15, 5:00, 7:30等）` : \nrole === 'UTILITY' || role === 'SUPPORT' ?\n  `3. 具体的なワード位置（例: 1:30リバーブッシュ、3:15ドラゴンピット入口、5:00トライブッシュ）\n   4. 味方ADCとの具体的なレーンコンボ（例: LuluのE→Q→ADCのオールイン）` :\n  `3. 対面${context.matchContext.laneOpponent}に対する具体的なウェーブ管理\n   4. レベル2,3,6のパワースパイクでの具体的なトレード方法`}\n\n## 具体的な時間指定アクション（${role}）\n${role === 'UTILITY' || role === 'SUPPORT' ?\n  `- 1:30: リバーブッシュへの最初のワード\n- 3:15: ドラゴン前の視界確保開始\n- 5:00-6:00: 最初のリコール（コントロールワード購入必須）\n- 8:00: サポートアイテムクエスト完了目標\n- 10:00-14:00: オブジェクト周辺の視界制圧` :\nrole === 'JUNGLE' ?\n  `- 1:30: リーシュ開始（Red/Blue）\n- 3:15-3:30: 最初のフルクリア完了\n- 3:30-4:00: スカトルコンテストまたは最初のGank\n- 5:00: 最初のリコール\n- 6:00-14:00: ドラゴン/ヘラルドコントロール` :\n  `- 1:30-3:00: レベル2先行を狙う\n- 3:00-5:00: レベル3でのトレード優位確立\n- 5:00-6:00: 最初のリコールタイミング\n- 6:00-10:00: レベル6パワースパイク活用\n- 10:00-14:00: サイドレーンプレッシャーまたはグループ`}\n\n${summonerName}選手の14分時点のパフォーマンス：\n## ベンチマークデータ（${currentTier}ランクの目標値）\n- 目標CS@14分: ${csGoal}\n- 目標ゴールド@14分: ${goldGoal}\n- 高レートCS@14分: ${benchmarkRole.cs_14}\n- 高レートゴールド@14分: ${benchmarkRole.gold_14}\n\n## 実際のパフォーマンス\n- CS@14分: ${actualCs}\n- ゴールド@14分: ${actualGold}\n- CS効率: ${context.gameAnalysis.csEfficiency || actualPerformance.cs_efficiency || 0}%\n- キル関与率@14分: ${context.gameAnalysis.killParticipation || 0}%\n- ワード設置数: ${actualWards}\n\n【コーチング要件】\n- APMに関する言及は避けること（実装されていない機能）\n- 具体的な時間（分:秒）でアクションを指定すること\n- 具体的な場所（ドラゴンピット入口、トライブッシュ等）を明示すること\n- 対面マッチアップを考慮した具体的な対策を提示すること\n- ルーン選択は対面${context.matchContext.laneOpponent}との相性を考慮し、根拠を明確に説明\n- キル関与率@14分の改善は、具体的な場面（例：3:15の敵JGフルクリア後のガンク対応）で指示\n- 「必ず」「絶対」などの断定的表現を避け、状況に応じた柔軟な表現を使用\n- コントロールワード購入は「1-2個を推奨」など柔軟な表現を使用\n${actualGold > goldGoal ? \n  `- 現在のゴールド${actualGold}は既に目標${goldGoal}を超えています。次の段階（高レート目標${benchmarkRole.gold_14}）への改善点を提示してください` :\n  `- 現在のゴールド${actualGold}から目標${goldGoal}への具体的な改善方法を提示してください`}\n\n【達成度チェック】\n- 8分時点: サポートアイテムクエスト完了状況を評価\n- 14分時点: ワード設置数${actualWards}個は${actualWards >= 8 ? '良好' : '改善の余地あり'}\n- キル関与率@14分 ${context.gameAnalysis.killParticipation}%: ${context.gameAnalysis.killParticipation === 0 ? '具体的な改善場面を提示' : '現状を評価'}\n\n【対面分析】\n- 対面: ${context.matchContext.laneOpponent}\n- この対面に対する具体的な戦術とルーン選択の根拠を提示\n- 3:15（敵JGフルクリア後）のガンク対応方法を明示\n\n【追加調査判定基準 - 強化版】\n以下の場合、need_additional_research: true を設定し、research_topicsに含める：\n- 対面${context.matchContext.laneOpponent}との特定マッチアップ勝率データ\n- 敵JG（Tryndamere等）vs 味方JG（Trundle等）のフルクリア速度比較\n- ${champion} vs ${context.matchContext.laneOpponent}でのルーン別勝率\n- 14分時点でのダメージトレード統計（キル関与率0%の場合）\n\n【時間帯別スキル/レベル想定】\n- 1:30: レベル1（Q or E）\n- 3:15-3:30: レベル3-4（Q,W,E取得、R未取得）\n- 6:00: レベル5-6（R取得直前または直後）\n- 8:00: レベル7-8（R取得済み）\n- 14:00: レベル8-9\n\n【経済的現実性】\n- 8分時点のサポート想定ゴールド: 1200-1500\n- サポートアイテム1段階完成後: トリンケットをオラクルレンズに変更推奨\n\n【レーン管理】\n- 3:15前: ウェーブをスローブッシュして味方JGの位置に合わせる\n- ガンク時: ウェーブを押し込まれた状態でフリーズ\n- ローム時: キャノンウェーブをプッシュしてからローム\n\n必ず以下のJSON形式のみで回答（説明文なし、全体で最大1万文字）:\n{\n  \"need_additional_research\": false,\n  \"research_topics\": [],\n  \"champion\": \"${champion}\",\n  \"role\": \"${roleOriginal}\",\n  \"patch\": \"${patch}\",\n  \"currentTier\": \"${currentTier}\",\n  \"nextTier\": \"${baseData.nextTier}\",\n  \"analysis\": {\n    \"cs_efficiency\": ${context.gameAnalysis.csEfficiency || Math.round((actualCs / csGoal) * 100)},\n    \"gold_efficiency\": ${Math.round((actualGold / goldGoal) * 100)},\n    \"itemization_score\": 75,\n    \"macro_play_rating\": ${Math.min(100, Math.max(0, \n      (context.gameAnalysis.killParticipation || 0) * 3 + \n      actualWards * 4 + \n      (context.gameAnalysis.objectiveParticipation || 0) * 3))}\n  },\n  \"recommendations\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ? \n      `\"【8分目標】サポートアイテムクエスト完了とオラクルレンズへの変更 - ${actualGold >= 500 ? '順調、トリンケット変更を' : 'ポークでスタック獲得'}\",\n       \"【ダメージトレード評価】キル関与率@14分 ${context.gameAnalysis.killParticipation}% - ${context.gameAnalysis.killParticipation === 0 ? '14分時点で0キルは一般的。重要なのはハラス頻度とトレード量' : '継続的にプレッシャー維持'}\",\n       \"【対面特化戦術】${context.matchContext.laneOpponent}対面での${champion}のルーン選択は、対面データ次第で調整が必要\"` :\n    role === 'JUNGLE' ?\n      `\"ジャングルCSを${csGoal}まで改善（現在${actualCs}） - 効率的なクリアパスが重要\",\n       \"${champion}のパッチ${patch}での最適なジャングルルート（Blue/Red開始）を実践\",\n       \"Gankとファームのバランスを改善 - レーナーのウェーブ状況を見極めてGank\"` :\n      `\"CSを${csGoal}まで改善（現在${actualCs}） - 10CS/分を意識したラストヒット\",\n       \"${champion}のパッチ${patch}でのウェーブコントロール技術を習得\",\n       \"レーン管理の改善 - スローブッシュ、フリーズ、ファストプッシュの使い分け\"`}\n  ],\n  \"priority_actions\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ?\n      `\"【ルーン選択】${context.matchContext.laneOpponent}対面の統計データに基づいて選択（追加調査推奨）\",\n       \"【3:15-3:30】レベル3-4想定、Q+W+Eでのトレード。Rは未取得なので位置取りで安全確保\",\n       \"【8分目標】約1200-1500ゴールド想定、サポートアイテム完成後はオラクルレンズに変更\"` :\n    role === 'JUNGLE' ?\n      `\"最初のフルクリアを3:30までに完了\",\n       \"スカトルクラブの優先度を理解し、適切なタイミングで確保\",\n       \"14分までに${goldGoal}ゴールド獲得を目標\"` :\n      `\"最初の3ウェーブで最大18CS中17CS以上を獲得\",\n       \"14分までに${goldGoal}ゴールド獲得を目標\",\n       \"キャノンミニオンを100%確実に獲得（105ゴールドの価値）\"`}\n  ],\n  \"benchmark_comparison\": {\n    \"vs_average\": ${Math.round(Math.max(-100, Math.min(100, ((actualCs / csGoal - 1) * 100))))},\n    \"vs_high_rank\": ${Math.round(Math.max(-100, Math.min(100, ((actualGold / benchmarkRole.gold_14 - 1) * 100))))}\n  }\n}`,\n\n  korean: `당신은 LoL 프로 코치입니다. 최신 패치 ${patch}에서 ${champion} (${roleOriginal})을 상세히 분석해주세요.\n\n${championPrompt}\n\n## 게임 컨텍스트\n- 아군 팀: ${context.matchContext.allyTeam}\n- 적 팀: ${context.matchContext.enemyTeam}\n- 라인 상대: ${context.matchContext.laneOpponent}\n\n## 분석 항목\n1. ${champion}의 패치 ${patch} 최신 메타 (룬, 빌드, 플레이스타일)\n2. 상대 ${context.matchContext.laneOpponent}와의 매치업 상세\n${role === 'JUNGLE' ? \n  `3. 구체적인 정글 패스 (예: 레드→돌거북→칼날부리→늑대→블루→두꺼비 3:30까지)\n   4. 적 정글러를 고려한 바위게 우선순위와 갱킹 타이밍 (3:15, 5:00, 7:30 등)` : \nrole === 'UTILITY' || role === 'SUPPORT' ?\n  `3. 구체적인 와드 위치 (예: 1:30 리버 부시, 3:15 드래곤 입구, 5:00 트라이부시)\n   4. 아군 ADC와의 구체적인 라인 콤보 (예: 룰루 E→Q→ADC 올인)` :\n  `3. 상대 ${context.matchContext.laneOpponent}에 대한 구체적인 웨이브 관리\n   4. 레벨 2,3,6 파워스파이크에서의 구체적인 트레이드 방법`}\n\n## 구체적인 시간별 액션 (${role})\n${role === 'UTILITY' || role === 'SUPPORT' ?\n  `- 1:30: 리버 부시 첫 와드\n- 3:15: 드래곤 전 시야 확보 시작\n- 5:00-6:00: 첫 리콜 (제어 와드 구매 필수)\n- 8:00: 서포트 아이템 퀘스트 완료 목표\n- 10:00-14:00: 오브젝트 주변 시야 제압` :\nrole === 'JUNGLE' ?\n  `- 1:30: 리쉬 시작 (레드/블루)\n- 3:15-3:30: 첫 풀클리어 완료\n- 3:30-4:00: 바위게 경쟁 또는 첫 갱킹\n- 5:00: 첫 리콜\n- 6:00-14:00: 드래곤/헤럴드 컨트롤` :\n  `- 1:30-3:00: 레벨 2 선점 노리기\n- 3:00-5:00: 레벨 3 트레이드 우위 확립\n- 5:00-6:00: 첫 리콜 타이밍\n- 6:00-10:00: 레벨 6 파워스파이크 활용\n- 10:00-14:00: 사이드레인 압박 또는 그룹`}\n\n${summonerName} 선수의 14분 시점 성과:\n## 벤치마크 데이터（${currentTier} 랭크 목표）\n- 목표 CS@14분: ${csGoal}\n- 목표 골드@14분: ${goldGoal}\n- 고티어 CS@14분: ${benchmarkRole.cs_14}\n- 고티어 골드@14분: ${benchmarkRole.gold_14}\n\n## 실제 퍼포먼스\n- CS@14분: ${actualCs}\n- 골드@14분: ${actualGold}\n- CS 효율: ${context.gameAnalysis.csEfficiency || actualPerformance.cs_efficiency || 0}%\n- 킬 관여율@14분: ${context.gameAnalysis.killParticipation || 0}%\n- 와드 설치: ${actualWards}\n\n【코칭 요구사항】\n- APM에 대한 언급 피하기 (구현되지 않은 기능)\n- 구체적인 시간 (분:초)으로 액션 지정\n- 구체적인 장소 (드래곤 입구, 트라이부시 등) 명시\n- 상대 매치업을 고려한 구체적인 대책 제시\n- 룬 선택은 상대 ${context.matchContext.laneOpponent}와의 상성을 고려하여 근거를 명확히 설명\n- 킬 관여율 개선은 구체적인 장면 (예: 3:15 적 JG 풀클리어 후 갱킹 대응)에서 지시\n- \"반드시\", \"절대\" 등 단정적 표현을 피하고 상황에 따른 유연한 표현 사용\n- 제어 와드 구매는 \"1-2개 권장\" 등 유연한 표현 사용\n${actualGold > goldGoal ? \n  `- 현재 골드 ${actualGold}는 이미 목표 ${goldGoal}를 초과. 다음 단계(고티어 목표 ${benchmarkRole.gold_14})로의 개선점 제시` :\n  `- 현재 골드 ${actualGold}에서 목표 ${goldGoal}로의 구체적인 개선 방법 제시`}\n\n【달성도 체크】\n- 8분 시점: 서포트 아이템 퀘스트 완료 상황 평가\n- 14분 시점: 와드 설치 수 ${actualWards}개는 ${actualWards >= 8 ? '양호' : '개선 여지 있음'}\n- 킬 관여율 ${context.gameAnalysis.killParticipation}%: ${context.gameAnalysis.killParticipation === 0 ? '구체적인 개선 장면 제시' : '현황 평가'}\n\n【상대 분석】\n- 상대: ${context.matchContext.laneOpponent}\n- 이 상대에 대한 구체적인 전술과 룬 선택 근거 제시\n- 3:15 (적 JG 풀클리어 후) 갱킹 대응 방법 명시\n\n【추가 조사 판정 기준 - 강화판】\n다음의 경우 need_additional_research: true 설정하고 research_topics에 포함:\n- 상대 ${context.matchContext.laneOpponent}와의 특정 매치업 승률 데이터\n- 적 JG(Tryndamere 등) vs 아군 JG(Trundle 등)의 풀클리어 속도 비교\n- ${champion} vs ${context.matchContext.laneOpponent}에서 룬별 승률\n- 14분 시점 데미지 트레이드 통계 (킬 관여율 0%인 경우)\n\n【시간대별 스킬/레벨 예상】\n- 1:30: 레벨1 (Q or E)\n- 3:15-3:30: 레벨3-4 (Q,W,E 습득, R 미습득)\n- 6:00: 레벨5-6 (R 습득 직전 또는 직후)\n- 8:00: 레벨7-8 (R 습득 완료)\n- 14:00: 레벨8-9\n\n【경제적 현실성】\n- 8분 시점 서포트 예상 골드: 1200-1500\n- 서포트 아이템 1단계 완성 후: 렌즈로 변경 권장\n\n【라인 관리】\n- 3:15 전: 웨이브를 슬로우 푸시하여 아군 JG 위치에 맞춤\n- 갱킹 시: 웨이브가 밀려온 상태에서 프리즈\n- 로밍 시: 캐논 웨이브를 푸시 후 로밍\n\n반드시 다음 JSON 형식으로만 답변（설명 없음, 전체 최대 1만자）:\n{\n  \"need_additional_research\": false,\n  \"research_topics\": [],\n  \"champion\": \"${champion}\",\n  \"role\": \"${roleOriginal}\",\n  \"patch\": \"${patch}\",\n  \"currentTier\": \"${currentTier}\",\n  \"nextTier\": \"${baseData.nextTier}\",\n  \"analysis\": {\n    \"cs_efficiency\": ${context.gameAnalysis.csEfficiency || Math.round((actualCs / csGoal) * 100)},\n    \"gold_efficiency\": ${Math.round((actualGold / goldGoal) * 100)},\n    \"itemization_score\": 75,\n    \"macro_play_rating\": ${Math.min(100, Math.max(0, (context.gameAnalysis.killParticipation || 0) * 2 + actualWards * 5))}\n  },\n  \"recommendations\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ? \n      `\"【8분 목표】서포트 아이템 퀘스트 완료 및 렌즈 변경 - ${actualGold >= 500 ? '순조롭게 진행, 렌즈 변경' : '포킹으로 스택 획득'}\",\n       \"【데미지 트레이드 평가】킬 관여율@14분 ${context.gameAnalysis.killParticipation}% - ${context.gameAnalysis.killParticipation === 0 ? '14분에 0킬은 일반적. 중요한 것은 견제 빈도와 트레이드량' : '지속적인 압박 유지'}\",\n       \"【상대 특화 전술】${context.matchContext.laneOpponent} 상대 ${champion}의 룬 선택은 상대 데이터에 따라 조정 필요\"` :\n    role === 'JUNGLE' ?\n      `\"정글 CS를 ${csGoal}까지 개선（현재 ${actualCs}） - 효율적인 클리어 패스가 중요\",\n       \"${champion}의 패치 ${patch}에서 최적 정글 루트（블루/레드 시작） 실천\",\n       \"갱킹과 파밍 밸런스 개선 - 라이너의 웨이브 상황 파악 후 갱킹\"` :\n      `\"CS를 ${csGoal}까지 개선（현재 ${actualCs}） - 10CS/분을 의식한 라스트 히트\",\n       \"${champion}의 패치 ${patch}에서 웨이브 컨트롤 기술 습득\",\n       \"라인 관리 개선 - 슬로우 푸시, 프리즈, 패스트 푸시 구분 사용\"`}\n  ],\n  \"priority_actions\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ?\n      `\"【룬 선택】${context.matchContext.laneOpponent} 상대 통계 데이터 기반 선택 (추가 조사 권장)\",\n       \"【3:15-3:30】레벨3-4 예상, Q+W+E로 트레이드. R 미습득이므로 포지셔닝으로 안전 확보\",\n       \"【8분 목표】약 1200-1500골드 예상, 서포트 아이템 완성 후 렌즈로 변경\"` :\n    role === 'JUNGLE' ?\n      `\"첫 풀클리어를 3:30까지 완료\",\n       \"바위게 우선순위 이해하고 적절한 타이밍에 확보\",\n       \"14분까지 ${goldGoal} 골드 획득 목표\"` :\n      `\"첫 3웨이브에서 최대 18CS 중 17CS 이상 획득\",\n       \"14분까지 ${goldGoal} 골드 획득 목표\",\n       \"캐논 미니언 100% 확실히 획득（105골드 가치）\"`}\n  ],\n  \"benchmark_comparison\": {\n    \"vs_average\": ${Math.round(Math.max(-100, Math.min(100, ((actualCs / csGoal - 1) * 100))))},\n    \"vs_high_rank\": ${Math.round(Math.max(-100, Math.min(100, ((actualGold / benchmarkRole.gold_14 - 1) * 100))))}\n  }\n}`,\n\n  english: `You are a professional LoL coach. Analyze ${champion} (${roleOriginal}) for patch ${patch}.\n\n${championPrompt}\n\n## Match Context\n- Ally: ${context.matchContext.allyTeam}\n- Enemy: ${context.matchContext.enemyTeam}\n- Opponent: ${context.matchContext.laneOpponent}\n\n## Performance (14min)\n- CS: ${actualCs}/${csGoal} (High-elo: ${benchmarkRole.cs_14})\n- Gold: ${actualGold}/${goldGoal} (High-elo: ${benchmarkRole.gold_14})\n- Kill Participation: ${context.gameAnalysis.killParticipation}%\n- Wards: ${actualWards}\n\n## Key Timings\n${role === 'UTILITY' || role === 'SUPPORT' ?\n  `- 1:30 river ward, 3:15 dragon vision, 8:00 Oracle Lens switch` :\nrole === 'JUNGLE' ?\n  `- 3:15 full clear, 3:30 scuttle/gank, 6:00+ objective control` :\n  `- Lvl2 at 1:30, Lvl3 at 3:00, Lvl6 at 6:00 power spikes`}\n\nSTRICT OUTPUT RULES:\n1. Return ONLY the JSON structure below\n2. Total output MUST be under 10000 characters\n3. DO NOT add ANY fields not listed here\n4. Each array: maximum 3-5 items, 50-100 words each\n5. FORBIDDEN fields: matchup_details, specific_combos, timed_actions, step_by_step_improvement_methods, synergy_with_adc, lane_management_methods, core_build_path, situational_item_choices\n\nONLY this structure:\n{\n  \"need_additional_research\": false,\n  \"research_topics\": [],\n  \"champion\": \"${champion}\",\n  \"role\": \"${roleOriginal}\",\n  \"patch\": \"${patch}\",\n  \"currentTier\": \"${currentTier}\",\n  \"nextTier\": \"${baseData.nextTier}\",\n  \"analysis\": {\n    \"cs_efficiency\": ${context.gameAnalysis.csEfficiency || Math.round((actualCs / csGoal) * 100)},\n    \"gold_efficiency\": ${Math.round((actualGold / goldGoal) * 100)},\n    \"itemization_score\": 75,\n    \"macro_play_rating\": ${Math.min(100, Math.max(0, (context.gameAnalysis.killParticipation || 0) * 2 + actualWards * 5))}\n  },\n  \"recommendations\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ? \n      `\"[8 min goal] Support item quest completion and Oracle Lens switch - ${actualGold >= 500 ? 'On track, switch trinket' : 'Poke for stacks'}\",\n       \"[Damage trade evaluation] Kill participation@14min ${context.gameAnalysis.killParticipation}% - ${context.gameAnalysis.killParticipation === 0 ? '0 kills at 14 min is common. Focus on harass frequency and trade volume' : 'Maintain consistent pressure'}\",\n       \"[Matchup-specific tactics] ${champion} rune choice vs ${context.matchContext.laneOpponent} should adjust based on matchup data\"` :\n    role === 'JUNGLE' ?\n      `\"Improve jungle CS to ${csGoal} (currently ${actualCs}) - Efficient clear path is crucial\",\n       \"Practice ${champion}'s optimal jungle route (Blue/Red start) for patch ${patch}\",\n       \"Balance ganking and farming - Read laner wave states before ganking\"` :\n      `\"Improve CS to ${csGoal} (currently ${actualCs}) - Focus on 10 CS/min last hitting\",\n       \"Master ${champion}'s wave control techniques for patch ${patch}\",\n       \"Improve lane management - Differentiate between slow push, freeze, and fast push\"`}\n  ],\n  \"priority_actions\": [\n    ${role === 'UTILITY' || role === 'SUPPORT' ?\n      `\"[Rune selection] Choose based on ${context.matchContext.laneOpponent} matchup statistics (additional research recommended)\",\n       \"[3:15-3:30] Level 3-4 expected, trade with Q+W+E. R not available so secure safety through positioning\",\n       \"[8 min goal] ~1200-1500 gold expected, switch to Oracle Lens after support item completion\"` :\n    role === 'JUNGLE' ?\n      `\"Complete first full clear by 3:30\",\n       \"Understand scuttle crab priority and secure at proper timing\",\n       \"Aim for ${goldGoal} gold by 14 minutes\"` :\n      `\"Secure 17+ CS from first 3 waves (18 max)\",\n       \"Aim for ${goldGoal} gold by 14 minutes\",\n       \"Secure 100% of cannon minions (105 gold value)\"`}\n  ],\n  \"benchmark_comparison\": {\n    \"vs_average\": ${Math.round(Math.max(-100, Math.min(100, ((actualCs / csGoal - 1) * 100))))},\n    \"vs_high_rank\": ${Math.round(Math.max(-100, Math.min(100, ((actualGold / benchmarkRole.gold_14 - 1) * 100))))}\n  }\n}`\n};\n\n// chatInputを生成（言語が存在しない場合はエラー）\nlet chatInput;\nif (promptTemplates[baseData.language]) {\n  chatInput = promptTemplates[baseData.language];\n} else {\n  throw new Error(`Unsupported language: ${baseData.language}. Supported: japanese, korean, english`);\n}\n\n// Return simplified data structure with additional info for Format BrightData Query\nreturn {\n  json: {\n    // AI Agent用の必須フィールド\n    chatInput: chatInput,\n    \n    // Format BrightData Query用に追加（重要！）\n    summonerName: baseData.summonerName,\n    matchId: baseData.matchId,\n    champion: baseData.champion,\n    role: baseData.role,\n    patch: patch,  // パッチ情報を追加\n    currentTier: baseData.currentTier,\n    nextTier: baseData.nextTier,\n    division: baseData.division,\n    language: baseData.language,\n    locale: baseData.locale,\n    cache_key: baseData.cache_key,\n    coachingContext: context\n  }\n};"
+      },
+      "id": "6817b1aa-0a8f-4bfb-8f3e-56177d5a1be9",
+      "name": "Fix Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -976,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter AI Response - キャッシュから取得したデータを処理\nconst items = $input.all();\n\n// SQLノードから取得したキャッシュデータ\nconst cachedData = items[0]?.json;\n\n// キャッシュから取得したanalysis_resultを処理\nif (!cachedData || !cachedData.analysis_result) {\n  throw new Error('No cached analysis found');\n}\n\nconst result = typeof cachedData.analysis_result === 'string' \n  ? JSON.parse(cachedData.analysis_result) \n  : cachedData.analysis_result;\n\n// フロントエンド用に整形して返す\nreturn [{\n  json: {\n    need_additional_research: result.need_additional_research,\n    champion: result.champion,\n    role: result.role,\n    patch: result.patch,\n    currentTier: result.currentTier,\n    nextTier: result.nextTier,\n    analysis: result.analysis,\n    recommendations: result.recommendations,\n    priority_actions: result.priority_actions,\n    benchmark_comparison: result.benchmark_comparison,\n    cache_key: cachedData.cache_key,\n    from_cache: true,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        96,
+        -480
+      ],
+      "id": "5068e297-faf2-4814-aaa4-e7176a9538c8",
+      "name": "Fix Filtering"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter AI Response - キャッシュから取得したデータを処理\nconst items = $input.all();\n\n// SQLノードから取得したキャッシュデータ\nconst cachedData = items[0]?.json;\n\n// キャッシュから取得したanalysis_resultを処理\nif (!cachedData || !cachedData.analysis_result) {\n  throw new Error('No cached analysis found');\n}\n\nconst result = typeof cachedData.analysis_result === 'string' \n  ? JSON.parse(cachedData.analysis_result) \n  : cachedData.analysis_result;\n\n// フロントエンド用に整形して返す\nreturn [{\n  json: {\n    need_additional_research: result.need_additional_research,\n    champion: result.champion,\n    role: result.role,\n    patch: result.patch,\n    currentTier: result.currentTier,\n    nextTier: result.nextTier,\n    analysis: result.analysis,\n    recommendations: result.recommendations,\n    priority_actions: result.priority_actions,\n    benchmark_comparison: result.benchmark_comparison,\n    cache_key: cachedData.cache_key,\n    from_cache: true,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        -640
+      ],
+      "id": "d38e9b7c-3e59-4c34-beb8-09eea8016c82",
+      "name": "Cache Filtering"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n  // Return cached result\n  const cachedData = $json.analysis_result;\n\n  // AIの応答がJSON文字列の場合はパース\n  let parsedData = cachedData;\n  if (typeof cachedData === 'string') {\n    try {\n      // JSON文字列が\"```json\"で始まる場合の処理\n      let cleanJson = cachedData;\n      if (cachedData.includes('```json')) {\n        cleanJson = cachedData.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n      }\n      parsedData = JSON.parse(cleanJson);\n    } catch (e) {\n      // パースできない場合は元のデータをそのまま使用\n      // output フィールドでラップしない（Filtering.jsで処理するため）\n      parsedData = cachedData;\n    }\n  }\n\n  return {\n    json: {\n      success: true,\n      cached: true,\n      analysis_result: parsedData\n    }\n  };"
+      },
+      "id": "363a29a3-fe18-442c-9cdc-6aa503336722",
+      "name": "Return Cached1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        -480
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Merge Research Data": {
+      "main": [
+        [
+          {
+            "node": "Fix Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format BrightData Query": {
+      "main": [
+        [
+          {
+            "node": "BrightData Research vs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "BrightData Research_Bulid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Research Flag": {
+      "main": [
+        [
+          {
+            "node": "Store Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate LoLalytics URLs": {
+      "main": [
+        [
+          {
+            "node": "Check Tier Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Chat Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent with Research",
+            "type": "ai_memory",
+            "index": 0
+          },
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent with Research",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Cached": {
+      "main": [
+        [
+          {
+            "node": "Cache Filtering",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent with Research": {
+      "main": [
+        [
+          {
+            "node": "Store Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Analysis": {
+      "main": [
+        [
+          {
+            "node": "Return Cached1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Check Research Flag",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build RAG Context": {
+      "main": [
+        [
+          {
+            "node": "Merge Research Data",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge All Data": {
+      "main": [
+        [
+          {
+            "node": "Build RAG Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get 14-Min Analysis": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get Meta Knowledge": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store in Tier Cache": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Parse LoLalytics Data": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Store in Tier Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Stats": {
+      "main": [
+        [
+          {
+            "node": "Parse LoLalytics Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for HTML": {
+      "main": [
+        [
+          {
+            "node": "Extract Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape League of Graphs": {
+      "main": [
+        [
+          {
+            "node": "Format for HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Tier Cached?": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Scrape League of Graphs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Tier Cache": {
+      "main": [
+        [
+          {
+            "node": "Is Tier Cached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Cached?": {
+      "main": [
+        [
+          {
+            "node": "Return Cached",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate LoLalytics URLs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get 14-Min Analysis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Meta Knowledge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check AI Cache": {
+      "main": [
+        [
+          {
+            "node": "Is Cached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Data": {
+      "main": [
+        [
+          {
+            "node": "Check AI Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Format BrightData Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Research HTML_build": {
+      "main": [
+        [
+          {
+            "node": "Extract Research Stats_build",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Research Stats_build": {
+      "main": [
+        [
+          {
+            "node": "Parse Research Data_build",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Research Data_build": {
+      "main": [
+        [
+          {
+            "node": "Merge HTML",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "BrightData Research_Bulid": {
+      "main": [
+        [
+          {
+            "node": "Format Research HTML_build",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge HTML": {
+      "main": [
+        [
+          {
+            "node": "Merge Research Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BrightData Research vs": {
+      "main": [
+        [
+          {
+            "node": "Format Research HTML vs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Research HTML vs": {
+      "main": [
+        [
+          {
+            "node": "Extract Research Stats vs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Research Stats vs": {
+      "main": [
+        [
+          {
+            "node": "Parse Research Data vs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Research Data vs": {
+      "main": [
+        [
+          {
+            "node": "Merge HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fix Context": {
+      "main": [
+        [
+          {
+            "node": "AI Agent with Research",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Filtering": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fix Filtering": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Cached1": {
+      "main": [
+        [
+          {
+            "node": "Fix Filtering",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f86456b6-cfde-4df3-b151-e9caec2c3760",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "632105b63ad93b396ac21e2dcd244202b28fcdc6f71b8b1495bded7e462056e3"
+  },
+  "id": "Gp2t46R7wUe9GirB",
+  "tags": []
+}

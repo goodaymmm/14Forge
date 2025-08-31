@@ -1,0 +1,442 @@
+{
+  "name": "data-dragon-sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
+        }
+      },
+      "id": "1a4bdf12-df8a-446e-a726-59ce237aed32",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -1184,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://ddragon.leagueoflegends.com/api/versions.json",
+        "options": {}
+      },
+      "id": "1b3d8c97-e59f-4227-bb34-ac16d80faefe",
+      "name": "Fetch Latest Version",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        -976,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n automatically splits arrays into items, so $json is already a version string\nlet latestVersion = $json;\n\nconsole.log('Received data type:', typeof latestVersion);\nconsole.log('Received data:', latestVersion);\n\n// If it's already a string (which it should be), use it directly\nif (typeof latestVersion === 'string') {\n  // Validate version format (should be like \"15.16.1\")\n  if (!latestVersion.match(/^\\d+\\.\\d+\\.\\d+$/)) {\n    throw new Error('Version does not match expected format: ' + latestVersion);\n  }\n} else if (Array.isArray(latestVersion)) {\n  // Fallback: if it's still an array, take the first element\n  latestVersion = latestVersion[0];\n  if (!latestVersion || typeof latestVersion !== 'string') {\n    throw new Error('Invalid version format in array: ' + latestVersion);\n  }\n} else {\n  throw new Error('Unexpected data format: ' + JSON.stringify(latestVersion));\n}\n\nconsole.log('Latest LoL version:', latestVersion);\n\n// Languages to sync\nconst languages = ['ja_JP', 'en_US', 'ko_KR'];\n\nreturn {\n  latestVersion: latestVersion,\n  version: latestVersion,\n  languages: languages,\n  dataTypes: ['champion', 'item', 'runesReforged']\n};"
+      },
+      "id": "e5c6b827-233c-4829-8389-09ae224c74ed",
+      "name": "Process Version",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -784,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://host.docker.internal:3000/api/knowledge/current-patch",
+        "options": {}
+      },
+      "id": "0adc8d68-401a-482f-90f2-77330b3184d6",
+      "name": "Check Current Patch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        -896,
+        256
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "c7073813-54d8-4cf7-bb29-b80f8518d3ec",
+      "name": "Merge Versions",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -576,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.latestVersion }}",
+              "rightValue": "={{ $json.version || '0.0.0' }}",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              },
+              "id": "2ea333dd-ce62-44ca-b0b3-2e1f7cf6a05b"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a6b0966f-dde7-490d-be08-194b1c44c227",
+      "name": "New Version?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create URLs for all data types and languages\n\n// Handle multiple items from Merge node (append mode)\nconst items = $input.all();\n\n// Find the item from Process Version node (contains latestVersion)\nconst processVersionItem = items.find(item => item.json.latestVersion) || \n                          items.find(item => item.json.languages && item.json.dataTypes) || \n                          items[0];\n\n// Extract the LATEST version from Riot API (not current version from DB)\nconst latestVersion = processVersionItem.json.latestVersion;\nif (!latestVersion) {\n  throw new Error('Latest version not found. Make sure Process Version node provides latestVersion');\n}\n\n// Extract languages and dataTypes\nconst languages = processVersionItem.json.languages || ['ja_JP', 'en_US', 'ko_KR'];\nconst dataTypes = processVersionItem.json.dataTypes || ['champion', 'item', 'runesReforged'];\n\n// Validate version before creating URLs\nif (!latestVersion || typeof latestVersion !== 'string') {\n  throw new Error('Invalid version received: ' + latestVersion);\n}\n\nif (!latestVersion.match(/^\\d+\\.\\d+\\.\\d+$/)) {\n  throw new Error('Version format is incorrect: ' + latestVersion + ' (expected format: X.Y.Z)');\n}\n\nconsole.log('Creating URLs for version:', latestVersion);\nconsole.log('Languages:', languages);\nconsole.log('Data types:', dataTypes);\n\nconst urls = [];\n\nfor (const lang of languages) {\n  for (const dataType of dataTypes) {\n    const url = `https://ddragon.leagueoflegends.com/cdn/${latestVersion}/data/${lang}/${dataType}.json`;\n    console.log('Generated URL:', url);\n    \n    urls.push({\n      url: url,\n      language: lang,\n      dataType: dataType,\n      version: latestVersion\n    });\n  }\n}\n\nconsole.log(`Generated ${urls.length} URLs for data fetching`);\n\nreturn urls;"
+      },
+      "id": "08c293f4-d01b-4739-a4e7-b9aca06cb85d",
+      "name": "Generate URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 3,
+        "options": {}
+      },
+      "id": "8c62f750-2cf5-4c1d-8e57-385b30067eb3",
+      "name": "Split Into Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [
+        128,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "0b36c6fc-b162-4b6e-a9d0-7777d87b4707",
+      "name": "Fetch Data Dragon Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        320,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare data for storage\nconst fetchedData = $json;\nconst metadata = $('Split Into Batches').item.json;\n\n// Map dataType for database\nlet dbDataType = metadata.dataType;\nif (dbDataType === 'champion') dbDataType = 'champions';\nif (dbDataType === 'item') dbDataType = 'items';\nif (dbDataType === 'runesReforged') dbDataType = 'runes';\n\nreturn {\n  data_type: dbDataType,\n  patch_version: metadata.version,\n  language: metadata.language,\n  data: fetchedData\n};"
+      },
+      "id": "b295e2ef-7a41-4cfe-a062-c8178dc6ebb3",
+      "name": "Prepare for Storage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/knowledge/static-data",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "a7aed4e2-2c47-4b38-b54c-9f142a8bf688",
+      "name": "Store in Database",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        720,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/knowledge/patch-version",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"patch_version\": \"{{ $('Generate URLs').first().json.version }}\",\n  \"release_date\": \"{{ new Date().toISOString().split('T')[0] }}\",\n  \"notes_summary\": \"Patch {{ $('Generate URLs').first().json.version }} data synchronized\"\n}",
+        "options": {}
+      },
+      "id": "13fc3ea7-7aaf-470a-8190-a3c30f09fd10",
+      "name": "Update Patch Version",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        928,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "message",
+              "value": "Data Dragon sync completed successfully"
+            },
+            {
+              "name": "version",
+              "value": "={{ $json.latestVersion || $json.version }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bd6ebf3d-31e3-4975-8003-0808eaa64567",
+      "name": "Success Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "message",
+              "value": "No update needed - already on latest version"
+            },
+            {
+              "name": "current_version",
+              "value": "={{ $json.version }}"
+            },
+            {
+              "name": "latest_version",
+              "value": "={{ $json.latestVersion }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cb5a066d-db44-4c6b-9d91-e8a86580747a",
+      "name": "No Update Needed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        176
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Daily Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Latest Version",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Current Patch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Latest Version": {
+      "main": [
+        [
+          {
+            "node": "Process Version",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Version": {
+      "main": [
+        [
+          {
+            "node": "Merge Versions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Current Patch": {
+      "main": [
+        [
+          {
+            "node": "Merge Versions",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Versions": {
+      "main": [
+        [
+          {
+            "node": "New Version?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Version?": {
+      "main": [
+        [
+          {
+            "node": "Generate URLs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Update Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate URLs": {
+      "main": [
+        [
+          {
+            "node": "Split Into Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Into Batches": {
+      "main": [
+        [
+          {
+            "node": "Fetch Data Dragon Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Patch Version",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Data Dragon Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare for Storage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare for Storage": {
+      "main": [
+        [
+          {
+            "node": "Store in Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store in Database": {
+      "main": [
+        [
+          {
+            "node": "Split Into Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Patch Version": {
+      "main": [
+        [
+          {
+            "node": "Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f87a7f3c-fafa-41b5-a1d4-ec0f6d7da137",
+  "meta": {
+    "instanceId": "632105b63ad93b396ac21e2dcd244202b28fcdc6f71b8b1495bded7e462056e3"
+  },
+  "id": "SilnS9InyMytu1ik",
+  "tags": [
+    {
+      "createdAt": "2025-08-28T11:22:40.101Z",
+      "updatedAt": "2025-08-28T11:22:40.101Z",
+      "id": "lyjZIdg9h7bo4iqi",
+      "name": "KnowledgeBase"
+    },
+    {
+      "createdAt": "2025-08-28T11:22:40.142Z",
+      "updatedAt": "2025-08-28T11:22:40.142Z",
+      "id": "azQ4oHjCcKpGbx0t",
+      "name": "DataDragon"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# Default Champion Image Placeholder
+
+This file serves as a placeholder for the default champion image.
+In production, replace this with an actual default champion image file.
+
+For now, the application will use the Data Dragon API fallback mechanism.

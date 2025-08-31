@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: lol-analytics-db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-lol_stats}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - lol-analytics
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================
+  # API Server 
+  # ===========================================
+  # Note: For MVP development, run API locally instead:
+  # cd backend/api && npm install && npm run dev
+  # 
+  # Uncomment below when ready for containerized deployment
+  # ===========================================
+  # api:
+  #   build:
+  #     context: ./api
+  #     dockerfile: Dockerfile
+  #   container_name: lol-analytics-api
+  #   environment:
+  #     NODE_ENV: ${NODE_ENV:-development}
+  #     API_PORT: ${API_PORT:-3000}
+  #     DB_HOST: postgres
+  #     DB_PORT: 5432
+  #     DB_NAME: ${DB_NAME:-lol_stats}
+  #     DB_USER: ${DB_USER:-postgres}
+  #     DB_PASSWORD: ${DB_PASSWORD:-postgres}
+  #     RIOT_API_KEY: ${RIOT_API_KEY}
+  #     JWT_SECRET: ${JWT_SECRET:-development_secret}
+  #   ports:
+  #     - "${API_PORT:-3000}:3000"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   volumes:
+  #     - ./api/src:/app/src
+  #     - ./api/logs:/app/logs
+  #   networks:
+  #     - lol-analytics
+  #   command: npm run dev
+
+  # ===========================================
+  # n8n Workflow Engine
+  # ===========================================
+  # Phase 2 Feature: BrightData Integration & Automation
+  # - Multi-source data collection (OP.GG, U.GG, Mobalytics)
+  # - Real-time trend detection
+  # - Meta prediction workflows
+  # ===========================================
+  n8n:
+    # Use custom Debian-based image to fix DNS issues
+    build:
+      context: .
+      dockerfile: n8n.Dockerfile
+    container_name: lol-analytics-n8n
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
+    env_file:
+      - ./api/.env  # APIと同じ.envファイルを使用してBrightData認証情報を共有
+    environment:
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_HOST: 0.0.0.0
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678}
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-false}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-admin}
+      N8N_COMMUNITY_PACKAGES_ENABLED: "true"
+      NODE_FUNCTION_ALLOW_EXTERNAL: puppeteer-core
+      NODE_FUNCTION_ALLOW_BUILTIN: "*"
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n_data
+      DB_POSTGRESDB_USER: ${DB_USER:-postgres}
+      DB_POSTGRESDB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ../n8n_workflows:/home/node/.n8n/workflows
+    networks:
+      - lol-analytics
+
+  # ===========================================
+  # Redis Cache
+  # ===========================================
+  # Phase 2 Feature: Performance Optimization
+  # - API response caching
+  # - Session management
+  # - Rate limiting state
+  # 
+  # Uncomment when implementing caching optimization
+  # ===========================================
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: lol-analytics-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   networks:
+  #     - lol-analytics
+  #   command: redis-server --appendonly yes
+
+networks:
+  lol-analytics:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  n8n_data:
+  redis_data:

@@ -1,0 +1,401 @@
+{
+  "name": "Build-Blitz-Collector",
+  "nodes": [
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "success"
+            },
+            {
+              "name": "message",
+              "value": "LoLalytics collection completed"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "total_processed",
+              "value": "={{ $input.all().length }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "71d8e4f5-cbc0-4517-8557-5b3f3f5f69b9",
+      "name": "Completion Status",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "unit": "seconds"
+      },
+      "id": "de999e6a-3001-488e-9ce7-08045ec9f1d0",
+      "name": "Wait 1 second",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        2304,
+        64
+      ],
+      "webhookId": "batch-wait"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store in Database - Process Blitz.gg scraped data with patch version\nconst allInputs = $input.all();\n\n// データ構造を解析\n// Mergeノードから来るデータ: チャンピオンデータとパッチバージョンが混在した配列\n// チャンピオンデータ: champion, role, buildOrder等のプロパティを持つ\n// パッチバージョン: patch_versionプロパティのみを持つ\n\n// パッチバージョンオブジェクトを見つける（patch_versionのみを持つオブジェクト）\nconst patchObjects = allInputs.filter(item => {\n  const data = item?.json || item;\n  return data.patch_version && !data.champion && !data.role;\n});\n\n// パッチバージョンを取得（最初に見つかったものを使用）\nif (patchObjects.length === 0) {\n  throw new Error('[Blitz DB] ERROR: No patch version found in input data. Ensure Get Latest Patch node is connected properly.');\n}\nconst latestPatch = patchObjects[0]?.json?.patch_version || patchObjects[0]?.patch_version;\n\n// チャンピオンデータのみを抽出\nconst items = allInputs\n  .filter(item => {\n    const data = item?.json || item;\n    // championまたはroleプロパティがあるものをチャンピオンデータとして扱う\n    return data.champion || data.role;\n  })\n  .map(item => ({\n    json: item.json || item\n  }));\n\nconsole.log(`[Blitz DB] Storing ${items.length} champion statistics from Blitz.gg`);\nconsole.log(`[Blitz DB] Using patch version: ${latestPatch}`);\n  \n  const storedItems = [];\n  const skippedItems = [];\n  const timestamp = new Date().toISOString();\n  \n  // Helper function: Calculate overall performance (weighted average)\n  function calculateOverallPerformance(data) {\n    const buildWR = data.buildOrder?.winRate || 0;\n    const buildGames = data.buildOrder?.games || 0;\n    const runeWR = data.runes?.winRate || 0;\n    const runeGames = data.runes?.games || 0;\n    \n    const totalGames = buildGames + runeGames;\n    if (totalGames === 0) return 50; // Default to 50% if no data\n    \n    // Weighted average based on sample size\n    return ((buildWR * buildGames) + (runeWR * runeGames)) / totalGames;\n  }\n  \n  // Helper function: Calculate confidence score based on sample size\n  function calculateConfidence(data) {\n    const totalGames = (data.buildOrder?.games || 0) + (data.runes?.games || 0);\n    // Convert to 0-100 score (500+ games = max confidence)\n    return Math.min(100, Math.round((totalGames / 500) * 100));\n  }\n  \n  // Helper function: Determine which metric is more reliable\n  function getRecommendedMetric(data) {\n    const buildGames = data.buildOrder?.games || 0;\n    const runeGames = data.runes?.games || 0;\n    \n    if (runeGames > buildGames * 2) return 'rune'; // Runes have significantly more data\n    if (buildGames > runeGames * 2) return 'build'; // Build has significantly more data\n    return 'balanced'; // Similar sample sizes\n  }\n  \n  for (const item of items) {\n    const data = item.json;\n    \n    // Check if data is ready for storage\n    if (!data.storage_ready) {\n      console.log(`⚠️ [Blitz DB] Skipping ${data.champion} ${data.role} - insufficient data`);\n      skippedItems.push(`${data.champion} ${data.role}`);\n      continue;\n    }\n    \n    // Calculate derived metrics\n    const overallPerformance = calculateOverallPerformance(data);\n    const confidenceScore = calculateConfidence(data);\n    const recommendedMetric = getRecommendedMetric(data);\n    \n    // In production, this would use Postgres node to store data\n    // Prepare the data structure with separate build and rune statistics\n    const dbRecord = {\n      // Basic champion info\n      champion_id: data.championId || data.champion,\n      champion_name: data.championName || data.champion,\n      role: data.role,\n      \n      // Build statistics (separate tracking)\n      build_win_rate: data.buildOrder?.winRate || 0,\n      build_games: data.buildOrder?.games || 0,\n      build_order: JSON.stringify(data.buildOrder || {}),\n      build_path: JSON.stringify(data.buildPath || {}),\n      \n      // Rune statistics (separate tracking)\n      rune_win_rate: data.runes?.winRate || 0,\n      rune_pick_rate: data.runes?.pickRate || 0,\n      rune_games: data.runes?.games || 0,\n      rune_data: JSON.stringify(data.runes || {}),\n      keystone: data.runes?.keystone || null,\n      \n      // Combined metrics\n      overall_performance: overallPerformance,\n      confidence_score: confidenceScore,\n      recommended_metric: recommendedMetric,\n      \n      // Change tracking (using rune win rate as primary)\n      win_rate_change: parseFloat(data.meta_changes?.win_rate_change || 0),\n      pick_rate_change: parseFloat(data.meta_changes?.pick_rate_change || 0),\n      is_significant_change: data.meta_changes?.is_significant || false,\n      \n      // Metadata\n      data_source: 'blitz.gg',\n      fetch_date: timestamp,\n      patch_version: latestPatch,  // 上部で取得したパッチバージョンを使用\n      scraped_successfully: data.scraped || false\n    };\n    \n    storedItems.push(dbRecord);\n    \n    // Detailed logging for significant changes\n    if (dbRecord.is_significant_change) {\n      console.log(`🔥 [Blitz DB] Significant: ${dbRecord.champion_name} ${dbRecord.role}`);\n      console.log(`   Build WR: ${dbRecord.build_win_rate.toFixed(1)}% (${dbRecord.build_games} games)`);\n      console.log(`   Rune WR: ${dbRecord.rune_win_rate.toFixed(1)}% (${dbRecord.rune_games} games)`);\n      console.log(`   Overall: ${dbRecord.overall_performance.toFixed(1)}% | Confidence: ${dbRecord.confidence_score}%`);\n      console.log(`   Recommended: Use ${dbRecord.recommended_metric} data`);\n    } else {\n      console.log(`✅ [Blitz DB] Stored: ${dbRecord.champion_name} ${dbRecord.role} - Overall: ${dbRecord.overall_performance.toFixed(1)}%`);\n    }\n  }\n  \n  // Summary logging\n  const significantCount = storedItems.filter(r => r.is_significant_change).length;\n  \n  console.log(`\\n📊 [Blitz DB] Storage Summary:`);\n  console.log(`   Total Processed: ${items.length}`);\n  console.log(`   Successfully Stored: ${storedItems.length}`);\n  console.log(`   Skipped (insufficient data): ${skippedItems.length}`);\n  console.log(`   Significant Changes: ${significantCount}`);\n  \n  if (skippedItems.length > 0) {\n    console.log(`   Skipped items: ${skippedItems.join(', ')}`);\n  }\n  \n  // Return comprehensive data for next nodes\n  return [{\n    json: {\n      status: 'success',\n      data_source: 'blitz.gg',\n      records_stored: storedItems.length,\n      records_skipped: skippedItems.length,\n      timestamp: timestamp,\n      significant_changes: significantCount,\n      patch_version: storedItems[0]?.patch_version,\n      stored_items: storedItems.map(item => ({\n        // Champion identity\n        champion: item.champion_name,\n        role: item.role,\n        \n        // Build statistics\n        build_stats: {\n          win_rate: item.build_win_rate,\n          games: item.build_games,\n          order: item.build_order ? JSON.parse(item.build_order) : {},\n          path: item.build_path ? JSON.parse(item.build_path) : {}\n        },\n        \n        // Rune statistics\n        rune_stats: {\n          win_rate: item.rune_win_rate,\n          pick_rate: item.rune_pick_rate,\n          games: item.rune_games,\n          keystone: item.keystone,\n          data: item.rune_data ? JSON.parse(item.rune_data) : {}\n        },\n        \n        // Combined analysis\n        overall_performance: item.overall_performance,\n        confidence_score: item.confidence_score,\n        recommended_metric: item.recommended_metric,\n        \n        // Meta changes\n        changes: {\n          win_rate_change: item.win_rate_change,\n          pick_rate_change: item.pick_rate_change,\n          is_significant: item.is_significant_change\n        },\n        \n        // Metadata\n        scraped_successfully: item.scraped_successfully\n      }))\n    }\n  }];"
+      },
+      "id": "90af9d8b-0d53-47e0-9596-9220aae4729e",
+      "name": "Store in Database",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Calculate meta changes and prepare for storage - Blitz.gg version\nconst items = $input.all();\nconsole.log(`[Blitz Meta] Processing ${items.length} items for meta tracking`);\n\nconst results = [];\nconst currentDate = new Date().toISOString().split('T')[0];\n\n// Get historical data (mock for now)\nconst getHistoricalData = (champion, role) => {\n  // In production, this would fetch from database\n  // Using baseline values for initial comparison\n  return {\n    win_rate: 50,\n    pick_rate: 10,\n    games: 100\n  };\n};\n\nfor (const item of items) {\n  const data = item.json;\n  const historical = getHistoricalData(data.champion || data.championName, data.role);\n  \n  // Safely extract Blitz data with fallbacks\n  // Prefer runes data as it has more games/samples\n  const currentWinRate = data?.runes?.winRate || \n                         data?.buildOrder?.winRate || \n                         50; // Default to 50% if no data\n  \n  const currentPickRate = data?.runes?.pickRate || \n                          10; // Default to 10% if no pickRate\n  \n  const currentGames = data?.runes?.games || \n                       data?.buildOrder?.games || \n                       0;\n  \n  // Validate data quality\n  const hasValidData = currentGames > 0 && \n                       (data?.runes || data?.buildOrder);\n  \n  if (!hasValidData) {\n    console.log(`⚠️ [Blitz Meta] Insufficient data for ${data.champion} ${data.role}`);\n  }\n  \n  // Calculate changes\n  const winRateChange = currentWinRate - historical.win_rate;\n  const pickRateChange = currentPickRate - historical.pick_rate;\n  \n  // Determine if significant change (±3% for win rate, ±5% for pick rate)\n  const isSignificant = Math.abs(winRateChange) >= 3 || \n                       Math.abs(pickRateChange) >= 5;\n  \n  // Prepare result with Blitz data structure\n  results.push({\n    json: {\n      ...data,\n      meta_changes: {\n        current_win_rate: currentWinRate,\n        current_pick_rate: currentPickRate,\n        current_games: currentGames,\n        win_rate_change: winRateChange.toFixed(2),\n        pick_rate_change: pickRateChange.toFixed(2),\n        is_significant: isSignificant,\n        data_source: 'blitz.gg',\n        date: currentDate,\n        has_valid_data: hasValidData\n      },\n      storage_ready: hasValidData // Only ready if we have valid data\n    }\n  });\n  \n  if (isSignificant && hasValidData) {\n    console.log(`🔥 [Blitz Meta] Significant change for ${data.champion} ${data.role}:`);\n    console.log(`   Win Rate: ${currentWinRate.toFixed(1)}% (${winRateChange > 0 ? '+' : ''}${winRateChange.toFixed(2)}%)`);\n    console.log(`   Pick Rate: ${currentPickRate.toFixed(1)}% (${pickRateChange > 0 ? '+' : ''}${pickRateChange.toFixed(2)}%)`);\n    console.log(`   Sample Size: ${currentGames} games`);\n  }\n}\n\nconst significantChanges = results.filter(r => r.json.meta_changes.is_significant).length;\nconsole.log(`Found ${significantChanges} champions with significant meta changes`);\n\nreturn results;"
+      },
+      "id": "c9f28d6b-3d3d-4606-9609-10e607542c35",
+      "name": "Track Meta Changes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "ebf76632-3ae5-4ac1-a928-220215abd865",
+      "name": "Process in Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scrape Champion by Role - Optimized version\nconst items = $input.all();\nconsole.log(`Processing ${items.length} roles for scraping`);\n\nconst puppeteer = require('puppeteer-core');\n\n// BrightData credentials\nconst ZONE_USER = 'brd-customer-hl_0d05da78-zone-lol_stats_unlocker';\nconst ZONE_PASSWORD = typeof $env !== 'undefined' ? $env.BRIGHTDATA_PASSWORD : process.env.BRIGHTDATA_PASSWORD;\nif (!ZONE_PASSWORD) {\n  throw new Error('BRIGHTDATA_PASSWORD environment variable is not set');\n}\n\n// Optimized timeout settings\nconst CONNECT_TIMEOUT = 120000;   // 120 seconds\nconst NAVIGATION_TIMEOUT = 120000; // 2 minutes\nconst SELECTOR_TIMEOUT = 10000;   // 10 seconds (reduced from 15)\nconst RENDER_WAIT = 1500;         // 1.5 seconds (reduced from 2)\n\nfunction getErrorDetails(error) {\n  if (error?.target?._req?.res) {\n    const { statusCode, statusMessage } = error.target._req.res;\n    return `Server Status ${statusCode}: ${statusMessage}`;\n  }\n  return error?.message || error?.toString() || JSON.stringify(error);\n}\n\n// Function to scrape a single role\nasync function scrapeRole(item) {\n  const role = item.json.role;\n  const url = item.json.url;\n  \n  console.log(`Starting scraping for role: ${role}`);\n  \n  // DNS pre-resolution\n  const dns = require('dns');\n  const util = require('util');\n  const resolve4 = util.promisify(dns.resolve4);\n  \n  try {\n    console.log(`[${role}] Pre-resolving DNS...`);\n    const addresses = await resolve4('brd.superproxy.io');\n    console.log(`[${role}] DNS resolved: ${addresses[0]}`);\n    await new Promise(resolve => setTimeout(resolve, 500)); // Reduced\n  } catch (dnsError) {\n    console.log(`[${role}] DNS pre-resolution failed: ${dnsError.message}`);\n  }\n  \n  let browser;\n  let lastError;\n  let champions = [];\n  \n  const SBR_WS_ENDPOINT = `wss://brd-customer-hl_0d05da78-zone-lol_stats_unlocker:${ZONE_PASSWORD}@brd.superproxy.io:9222`;\n  \n  // Retry logic with reduced delays\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      console.log(`[${role}] Attempt ${attempt}/3`);\n      \n      // Reduced delays\n      if (attempt > 1) {\n        const delay = attempt * 1000; // Reduced from 2000\n        console.log(`[${role}] Retry in ${delay/1000}s...`);\n        await new Promise(resolve => setTimeout(resolve, delay));\n      } else {\n        await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced from 2000\n      }\n      \n      browser = await puppeteer.connect({\n        browserWSEndpoint: SBR_WS_ENDPOINT\n      });\n      \n      console.log(`[${role}] Connected to BrightData`);\n      \n      const page = await browser.newPage();\n      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');\n      \n      // Navigate\n      await page.goto(url, {\n        waitUntil: 'networkidle2',\n        timeout: NAVIGATION_TIMEOUT\n      });\n      \n      // Wait for champion list\n      await page.waitForSelector('table, [class*=\"champion\"], [class*=\"tier-list\"]', {\n        timeout: SELECTOR_TIMEOUT\n      });\n      \n      // Reduced render wait\n      await new Promise(resolve => setTimeout(resolve, RENDER_WAIT));\n      \n      // Extract champion names\n      champions = await page.evaluate(() => {\n        const championNames = new Set();\n        \n        // Find the ranking table\n        const tables = document.querySelectorAll('table');\n        let rankingTable = null;\n        \n        for (const table of tables) {\n          if (table.closest('aside')) continue;\n          \n          const headers = table.querySelectorAll('thead th, thead td');\n          const headerText = Array.from(headers).map(h => h.textContent).join(' ');\n          if (headerText.includes('Win rate') || headerText.includes('Pick rate') ||\n              headerText.includes('Tier') || headerText.includes('Champion')) {\n            rankingTable = table;\n            break;\n          }\n        }\n        \n        // Extract from ranking table\n        if (rankingTable) {\n          const rows = rankingTable.querySelectorAll('tbody tr');\n          rows.forEach(row => {\n            const championCell = row.querySelector('td:nth-child(2)');\n            if (championCell) {\n              const link = championCell.querySelector('a');\n              if (link) {\n                const strongEl = link.querySelector('strong');\n                let name = strongEl ? strongEl.textContent : link.textContent;\n                name = name.trim();\n                \n                if (name && name.length > 1 && name.length < 30 && !name.includes('%')) {\n                  name = name.replace(/\\s+\\d+$/, '').trim();\n                  championNames.add(name);\n                }\n              }\n            }\n          });\n        }\n        \n        return Array.from(championNames);\n      });\n      \n      await browser.close();\n      \n      if (champions.length > 0) {\n        console.log(`✅ Found ${champions.length} ${role} champions`);\n        return {\n          json: {\n            role: role,\n            champions: champions,\n            count: champions.length,\n            attempt: attempt\n          }\n        };\n      }\n      \n      console.log(`⚠️ No champions found for ${role}`);\n      break;\n      \n    } catch (error) {\n      lastError = error;\n      const errorDetails = getErrorDetails(error);\n      console.log(`[ERROR] [${role}] ${errorDetails}`);\n      \n      if (browser) {\n        try { await browser.close(); } catch (e) {}\n      }\n    }\n  }\n  \n  // Failed\n  console.log(`❌ Failed to scrape ${role}`);\n  return {\n    json: {\n      role: role,\n      champions: [],\n      count: 0,\n      error: lastError ? getErrorDetails(lastError) : 'No champions found'\n    }\n  };\n}\n\n// Process all roles sequentially\nconst startTime = Date.now();\n\ntry {\n  const results = [];\n  \n  for (const item of items) {\n    try {\n      const result = await scrapeRole(item);\n      results.push(result);\n    } catch (error) {\n      const errorMessage = getErrorDetails(error);\n      console.log(`[ERROR] Fatal error for ${item.json.role}: ${errorMessage}`);\n      results.push({\n        json: {\n          role: item.json.role,\n          champions: [],\n          count: 0,\n          error: errorMessage\n        }\n      });\n    }\n  }\n  \n  const duration = ((Date.now() - startTime) / 1000).toFixed(1);\n  const successCount = results.filter(r => r.json.count > 0).length;\n  const totalChampions = results.reduce((sum, r) => sum + r.json.count, 0);\n  \n  console.log(`\\n📊 Summary: ${duration}s, ${successCount}/${results.length} roles, ${totalChampions} champions`);\n  \n  return results;\n  \n} catch (error) {\n  console.log('[ERROR] Fatal error:', getErrorDetails(error));\n  throw error;\n}"
+      },
+      "id": "9dec182c-7e88-42fd-996b-115bb0103e14",
+      "name": "Get Champion Lists",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        976,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare Role URLs for scraping\nconst roles = [\n  { role: 'TOP', position: 'top' },\n  { role: 'JUNGLE', position: 'jungle' },\n  { role: 'MIDDLE', position: 'mid' },\n  { role: 'BOTTOM', position: 'adc' },\n  { role: 'SUPPORT', position: 'support' }\n];\n\nconsole.log('Preparing URLs for', roles.length, 'roles');\n\nconst results = roles.map(r => ({\n  json: {\n    role: r.role,\n    position: r.position,\n    url: `https://op.gg/lol/champions?position=${r.position}`\n  }\n}));\n\nconsole.log('URLs prepared:', results.map(r => r.json.role).join(', '));\n\nreturn results;"
+      },
+      "id": "2a1a8511-d7f0-47f6-a7a1-4a7f77e352fa",
+      "name": "Prepare Role URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Simple execution logging\nconst currentDate = new Date();\n\nconsole.log('=== LoLalytics Collection Started ===');\nconsole.log(`Execution Time: ${currentDate.toISOString()}`);\nconsole.log(`Time: ${currentDate.toLocaleTimeString()}`);\nconsole.log('Collecting latest builds and runes data from LoLalytics...');\nconsole.log('Data will always be up-to-date as LoLalytics provides real-time statistics');\n\nreturn [{\n  json: {\n    executionTime: currentDate.toISOString(),\n    mode: 'standard',\n    message: 'Collecting latest LoLalytics data',\n    status: 'ready'\n  }\n}];"
+      },
+      "id": "0563a514-eb80-499f-bddd-5944d465a171",
+      "name": "Start Collection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT patch_version FROM patch_versions WHERE is_current = true LIMIT 1;",
+        "options": {}
+      },
+      "id": "dec2afac-f96f-4695-96f7-2b47e5a04f47",
+      "name": "Get Latest Patch",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1584,
+        80
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 5 * * *"
+            }
+          ]
+        }
+      },
+      "id": "d9f9d2aa-e0f6-4abf-ba44-4711ee92037f",
+      "name": "Daily at 5 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        400,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate Blitz.gg URLs from champion data\nconst roleData = $input.all();\nconsole.log(`Generating Blitz.gg URLs for ${roleData.length} roles`);\n\nconst workItems = [];\n\n// Role mapping for Blitz.gg\n// Blitz uses: top, jungle, mid, adc, support\nconst roleMap = {\n  'TOP': 'top',\n  'JUNGLE': 'jungle',\n  'MIDDLE': 'mid',     // Blitz uses 'mid' not 'middle'\n  'BOTTOM': 'adc',     // Blitz uses 'adc' not 'bottom'\n  'SUPPORT': 'support'\n};\n\n// Fixed parameters for all URLs\nconst tier = 'MASTER%2B';  // MASTER+ tier\nconst region = 'WORLD';     // Worldwide stats\n\nfor (const item of roleData) {\n  const role = item.json.role;\n  const champions = item.json.champions || [];\n  const blitzRole = roleMap[role];\n  \n  if (!blitzRole) {\n    console.warn(`Unknown role: ${role}`);\n    continue;\n  }\n  \n  for (const champion of champions) {\n    // Normalize champion name for URL\n    // Blitz.gg uses proper case with spaces removed\n    // Examples: \"Aurelion Sol\" → \"AurelionSol\", \"Kog'Maw\" → \"KogMaw\"\n    const championUrlName = champion\n      .replace(/['\\s]/g, '')  // Remove apostrophes and spaces\n      .replace(/\\./g, '');     // Remove periods (e.g., \"Dr. Mundo\" → \"DrMundo\")\n    \n    workItems.push({\n      championId: championUrlName,\n      championName: champion,\n      role: role,\n      blitzRole: blitzRole,\n      url: `https://blitz.gg/lol/champions/${championUrlName}/build/?role=${blitzRole.toUpperCase()}&tier=${tier}&region=${region}`,\n      mergeKey: `${championUrlName}_${role}`,\n      tier: 'MASTER+',\n      region: 'WORLD'\n    });\n  }\n}\n\nconsole.log(`Generated ${workItems.length} Blitz.gg URLs`);\nconsole.log('Sample URLs:', workItems.slice(0, 3).map(w => ({\n  champion: w.championName,\n  role: w.blitzRole,\n  url: w.url\n})));\n\n// Log role distribution\nconst roleCount = {};\nfor (const item of workItems) {\n  roleCount[item.blitzRole] = (roleCount[item.blitzRole] || 0) + 1;\n}\nconsole.log('Role distribution:', roleCount);\n\nreturn workItems.map(item => ({ json: item }));"
+      },
+      "id": "82560d53-bcd1-404d-b389-b04aee8524e2",
+      "name": "Generate Blitz URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scrape Blitz.gg Build Data v2 - Optimized for accurate data extraction\n// Focuses on builds and runes with dynamic stats extraction\n\nconst puppeteer = require('puppeteer-core');\n\n// Configuration\nconst CONFIG = {\n  BRIGHTDATA: {\n    ZONE_USER: 'brd-customer-hl_0d05da78-zone-lol_stats_unlocker',\n    ZONE_PASSWORD: $env.BRIGHTDATA_PASSWORD || '',\n    MAX_RETRIES: 3\n  },\n  TIMEOUTS: {\n    navigation: 60000,\n    selector: 20000,\n    scrollWait: 3000,\n    renderWait: 5000\n  },\n  DEBUG: true\n};\n\n// Helper: Create browser connection\nasync function createBrowser(config) {\n  const sessionId = `blitz_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;\n  const AUTH = `${config.BRIGHTDATA.ZONE_USER}:${config.BRIGHTDATA.ZONE_PASSWORD}`;\n  const SBR_WS_ENDPOINT = `wss://${AUTH}@brd.superproxy.io:9222?session=${sessionId}`;\n  \n  return await puppeteer.connect({\n    browserWSEndpoint: SBR_WS_ENDPOINT,\n    ignoreHTTPSErrors: true,\n    timeout: 30000\n  });\n}\n\n// Helper: Setup page with complete scrolling\nasync function setupPage(browser, url, config) {\n  const page = await browser.newPage();\n  \n  // Block unnecessary resources\n  await page.setRequestInterception(true);\n  page.on('request', (request) => {\n    const blockedResources = ['image', 'stylesheet', 'font', 'media', 'svg'];\n    const blockedUrls = [\n      'googletagmanager.com',\n      'googlesyndication.com',\n      'doubleclick.net',\n      'facebook.com',\n      'amazon-adsystem.com'\n    ];\n    \n    // Allow Blitz.gg images for item/rune extraction\n    if (request.url().includes('blitz-cdn.blitz.gg')) {\n      request.continue();\n    } else if (blockedResources.includes(request.resourceType()) ||\n        blockedUrls.some(url => request.url().includes(url))) {\n      request.abort();\n    } else {\n      request.continue();\n    }\n  });\n  \n  // Navigate to page\n  await page.goto(url, { \n    waitUntil: 'networkidle2', \n    timeout: config.TIMEOUTS.navigation \n  });\n  \n  // Wait for React app to mount\n  await page.waitForTimeout(config.TIMEOUTS.scrollWait);\n  \n  // Complete page scroll to trigger all lazy loading\n  await page.evaluate(() => {\n    return new Promise((resolve) => {\n      let totalHeight = 0;\n      const distance = 200;\n      const timer = setInterval(() => {\n        const scrollHeight = document.body.scrollHeight;\n        window.scrollBy(0, distance);\n        totalHeight += distance;\n        \n        if(totalHeight >= scrollHeight){\n          clearInterval(timer);\n          window.scrollTo(0, 0);\n          setTimeout(resolve, 1000);\n        }\n      }, 100);\n    });\n  });\n  \n  // Additional wait for dynamic content\n  await page.waitForTimeout(config.TIMEOUTS.renderWait);\n  \n  // Second scroll pass\n  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));\n  await page.waitForTimeout(2000);\n  await page.evaluate(() => window.scrollTo(0, 0));\n  await page.waitForTimeout(2000);\n  \n  return page;\n}\n\n// Extract Build Order (complete items with order tags)\nfunction extractBuildOrder() {\n  console.log('[Blitz] Extracting Build Order...');\n  \n  const buildOrder = {\n    type: 'buildOrder',\n    items: [],\n    winRate: null,\n    games: null\n  };\n  \n  // Find Build Order section\n  const buildSections = document.querySelectorAll('.build-section');\n  let orderSection = null;\n  \n  for (const section of buildSections) {\n    const title = section.querySelector('h3');\n    if (title && title.textContent.includes('Item Build Order')) {\n      orderSection = section;\n      break;\n    }\n  }\n  \n  if (!orderSection) {\n    console.log('[Blitz] Build Order section not found');\n    return buildOrder;\n  }\n  \n  // Extract win rate and games from subtitle - look for the exact structure\n  // Structure: <div class=\"build-section\">...<span class=\"type-caption--semi build-subtitle\">36.7% Win Rate (60 Games)</span>\n  let subtitle = null;\n  \n  // First try: direct child selector within orderSection\n  subtitle = orderSection.querySelector(':scope > span.type-caption--semi.build-subtitle');\n  \n  if (!subtitle) {\n    // Second try: any descendant with exact classes\n    subtitle = orderSection.querySelector('span.type-caption--semi.build-subtitle');\n  }\n  \n  if (!subtitle) {\n    // Third try: span with both class parts\n    const spans = orderSection.querySelectorAll('span');\n    for (const span of spans) {\n      const classList = span.className || '';\n      if (classList.includes('type-caption--semi') && classList.includes('build-subtitle')) {\n        subtitle = span;\n        break;\n      }\n    }\n  }\n  \n  if (!subtitle) {\n    // Final fallback: look for any span containing \"Win Rate\" pattern\n    const spans = orderSection.querySelectorAll('span');\n    for (const span of spans) {\n      const text = span.textContent || '';\n      // Match pattern: XX.X% Win Rate (XX Games)\n      if (text.match(/\\d+\\.?\\d*%?\\s*Win Rate.*\\(\\d+\\s*Games?\\)/i)) {\n        subtitle = span;\n        console.log('[Blitz] Found subtitle via pattern match');\n        break;\n      }\n    }\n  }\n  \n  if (subtitle) {\n    const text = subtitle.textContent;\n    console.log('[Blitz] Build subtitle found:', text);\n    \n    // Parse \"36.7% Win Rate (60 Games)\"\n    const winMatch = text.match(/(\\d+\\.?\\d*)%?\\s*Win Rate/i);\n    const gamesMatch = text.match(/\\((\\d+)\\s*Games?\\)/i);\n    \n    buildOrder.winRate = winMatch ? parseFloat(winMatch[1]) : null;\n    buildOrder.games = gamesMatch ? parseInt(gamesMatch[1]) : null;\n    console.log(`[Blitz] Build Order stats - WR: ${buildOrder.winRate}%, Games: ${buildOrder.games}`);\n  } else {\n    console.log('[Blitz] WARNING: Build subtitle not found');\n  }\n  \n  // Extract items with specific order tags\n  const orderTags = ['Starting', '1st', '2nd', '3rd', '4th', '5th', '6th'];\n  const processedItems = new Set();\n  \n  orderTags.forEach(tag => {\n    // Find all containers with this tag\n    const allContainers = orderSection.querySelectorAll('.⚡2472b28b');\n    \n    for (const container of allContainers) {\n      const tagElement = container.querySelector('.tag p, p.type-caption--bold, .tag');\n      \n      if (tagElement) {\n        const tagText = tagElement.textContent.trim();\n        let matches = false;\n        \n        // Check if this container has the current tag\n        if (tag === 'Starting' && tagText.toLowerCase() === 'starting') {\n          matches = true;\n        } else if (tag !== 'Starting' && tagText === tag) {\n          matches = true;\n        }\n        \n        if (matches) {\n          // Get the item image from this container\n          const itemImg = container.querySelector('img.item-img, img[src*=\"/item/\"]');\n          \n          if (itemImg && itemImg.alt) {\n            const itemName = itemImg.alt;\n            const key = `${itemName}_${tag}`;\n            \n            // Only add if not already processed\n            if (!processedItems.has(key)) {\n              buildOrder.items.push({\n                name: itemName,\n                order: tag\n              });\n              processedItems.add(key);\n              console.log(`[Blitz] Build Order item: ${itemName} (${tag})`);\n              break; // Found item for this tag, move to next tag\n            }\n          }\n        }\n      }\n    }\n  });\n  \n  // Also collect any situational items without duplicating\n  const situationalContainers = orderSection.querySelectorAll('.⚡2472b28b');\n  situationalContainers.forEach(container => {\n    const itemImg = container.querySelector('img.item-img, img[src*=\"/item/\"]');\n    \n    if (itemImg && itemImg.alt) {\n      const itemName = itemImg.alt;\n      // Check if this item already exists in our list\n      const exists = buildOrder.items.some(item => item.name === itemName);\n      \n      if (!exists) {\n        // This might be a situational/alternative item\n        const tagElement = container.querySelector('.tag p, p.type-caption--bold, .tag');\n        if (tagElement && tagElement.textContent.includes('Situational')) {\n          buildOrder.items.push({\n            name: itemName,\n            order: 'Situational'\n          });\n          console.log(`[Blitz] Situational item: ${itemName}`);\n        }\n      }\n    }\n  });\n  \n  console.log(`[Blitz] Extracted ${buildOrder.items.length} build order items`);\n  return buildOrder;\n}\n\n// Extract Build Path (purchase order including components)\nfunction extractBuildPath() {\n  console.log('[Blitz] Extracting Build Path...');\n  \n  const buildPath = {\n    type: 'buildPath',\n    items: []\n  };\n  \n  // Look specifically for div.build-section > div.⚡84e0b143 structure\n  const buildSections = document.querySelectorAll('.build-section');\n  let flowSection = null;\n  \n  for (const section of buildSections) {\n    // Check if this build-section contains the ⚡84e0b143 div\n    const targetDiv = section.querySelector('.⚡84e0b143, div[class*=\"84e0b143\"]');\n    if (targetDiv) {\n      flowSection = targetDiv;\n      console.log('[Blitz] Found target div.⚡84e0b143 within build-section');\n      break;\n    }\n  }\n  \n  if (flowSection) {\n    // Extract items ONLY from this specific div\n    const flowItems = flowSection.querySelectorAll('img[src$=\".webp\"], img[src*=\".webp\"]');\n    \n    console.log(`[Blitz] Found ${flowItems.length} potential .webp images in target div`);\n    \n    flowItems.forEach(img => {\n      const src = img.src || img.getAttribute('src') || '';\n      const itemName = img.alt || img.title || '';\n      \n      // Only include if it's an item (has /item/ in URL) and not a rune/spell\n      if (itemName && \n          src.includes('/item/') &&\n          !buildPath.items.includes(itemName)) {\n        buildPath.items.push(itemName);\n        console.log(`[Blitz] Added to Build Path: ${itemName}`);\n      }\n    });\n    \n    // If no items found with .webp, try data-tooltip approach\n    if (buildPath.items.length === 0) {\n      console.log('[Blitz] No items found with .webp selector, trying div[data-tooltip] approach');\n      const tooltipDivs = flowSection.querySelectorAll('div[data-tooltip]');\n      \n      tooltipDivs.forEach(div => {\n        const tooltip = div.getAttribute('data-tooltip') || '';\n        // Extract item name from tooltip content\n        const nameMatch = tooltip.match(/item-name[^>]*>([^<]+)</);\n        if (nameMatch && nameMatch[1]) {\n          const itemName = nameMatch[1];\n          if (!buildPath.items.includes(itemName)) {\n            buildPath.items.push(itemName);\n            console.log(`[Blitz] Added from tooltip: ${itemName}`);\n          }\n        }\n      });\n    }\n    \n    // Limit to maximum 20 items\n    if (buildPath.items.length > 20) {\n      console.log(`[Blitz] Limiting Build Path from ${buildPath.items.length} to 20 items`);\n      buildPath.items = buildPath.items.slice(0, 20);\n    }\n  } else {\n    console.log('[Blitz] WARNING: Could not find div.⚡84e0b143 within any build-section');\n  }\n  \n  console.log(`[Blitz] Extracted ${buildPath.items.length} build path items: ${buildPath.items.join(', ')}`);\n  return buildPath;\n}\n\n// Extract Runes with dynamic stats\nfunction extractRunes() {\n  console.log('[Blitz] Extracting Runes...');\n  \n  const runeData = {\n    keystone: null,\n    primaryTree: null,\n    primaryRunes: [],\n    secondaryTree: null,\n    secondaryRunes: [],\n    statMods: [],\n    winRate: null,\n    pickRate: null,\n    games: null\n  };\n  \n  // Find rune selection buttons container - look for the container with multiple rune option buttons\n  const runeContainer = document.querySelector('div[class*=\"fa4d64f\"], .rune-selector, .runes-container');\n  \n  if (runeContainer) {\n    console.log('[Blitz] Found rune container, looking for buttons...');\n    \n    // Get all buttons in the container\n    const allButtons = runeContainer.querySelectorAll('button');\n    console.log(`[Blitz] Found ${allButtons.length} rune buttons`);\n    \n    // Find the selected button (data-selected=\"true\")\n    let selectedButton = null;\n    for (const btn of allButtons) {\n      const isSelected = btn.getAttribute('data-selected');\n      if (isSelected === 'true') {\n        selectedButton = btn;\n        console.log('[Blitz] Found selected button with data-selected=\"true\"');\n        break;\n      }\n    }\n    \n    // If no explicitly selected button, try the first button (often default selected)\n    if (!selectedButton && allButtons.length > 0) {\n      selectedButton = allButtons[0];\n      console.log('[Blitz] Using first button as selected (default)');\n    }\n    \n    if (selectedButton) {\n      // Debug: log what we're looking at\n      const buttonText = selectedButton.textContent;\n      console.log(`[Blitz] Selected button text: ${buttonText.substring(0, 100)}...`);\n      \n      // Extract win rate from button - use exact class names from log5.md\n      const winrateSpan = selectedButton.querySelector('span.winrate.type-caption--semi');\n      if (winrateSpan) {\n        const winText = winrateSpan.textContent;\n        const match = winText.match(/(\\d+\\.?\\d*)%?/);\n        runeData.winRate = match ? parseFloat(match[1]) : null;\n        console.log(`[Blitz] Rune win rate: ${runeData.winRate}% (from \"${winText}\")`);\n      } else {\n        console.log('[Blitz] WARNING: No winrate span found in selected button');\n      }\n      \n      // Extract games from button - use exact class names from log5.md\n      const gamesSpan = selectedButton.querySelector('span.games.type-caption');\n      if (gamesSpan) {\n        const gamesText = gamesSpan.textContent;\n        const match = gamesText.match(/(\\d+)/);\n        runeData.games = match ? parseInt(match[1]) : null;\n        console.log(`[Blitz] Rune games: ${runeData.games} (from \"${gamesText}\")`);\n      } else {\n        console.log('[Blitz] WARNING: No games span found in selected button');\n      }\n      \n      // Extract pickRate from data-tip attribute of active rune\n      // Look for the rune-active element within the keystone row\n      const activeRune = document.querySelector('.keystone-row img.rune-active[data-tip], .keystone-img.rune-active[data-tip]');\n      if (activeRune) {\n        const dataTip = activeRune.getAttribute('data-tip');\n        if (dataTip) {\n          // Look for pattern like \"84.4% Pick Rate\" in the tooltip\n          const pickMatch = dataTip.match(/(\\d+\\.?\\d*)%\\s*Pick Rate/i);\n          if (pickMatch) {\n            runeData.pickRate = parseFloat(pickMatch[1]);\n            console.log(`[Blitz] Rune pick rate: ${runeData.pickRate}% (from tooltip)`);\n          } else {\n            console.log('[Blitz] No pick rate found in active rune tooltip');\n          }\n        }\n      } else {\n        console.log('[Blitz] No active rune with data-tip found for pickRate extraction');\n      }\n      \n      // Extract keystone from selected button\n      const keystoneImg = selectedButton.querySelector('img.keystone[data-rune-id], img.keystone, img[class*=\"keystone\"]');\n      if (keystoneImg) {\n        const runeId = keystoneImg.getAttribute('data-rune-id');\n        console.log('[Blitz] Found keystone with rune ID:', runeId);\n      }\n    } else {\n      console.log('[Blitz] WARNING: No selected button found in rune container');\n    }\n  } else {\n    console.log('[Blitz] WARNING: Could not find rune container');\n    \n    // Fallback: try direct button selector\n    const selectedButton = document.querySelector('button[data-selected=\"true\"]');\n    if (selectedButton) {\n      console.log('[Blitz] Found selected button via direct selector (fallback)');\n      \n      const winrateSpan = selectedButton.querySelector('span.winrate, .winrate');\n      if (winrateSpan) {\n        const winText = winrateSpan.textContent;\n        const match = winText.match(/(\\d+\\.?\\d*)%?/);\n        runeData.winRate = match ? parseFloat(match[1]) : null;\n        console.log('[Blitz] Rune win rate (fallback):', runeData.winRate);\n      }\n      \n      const gamesSpan = selectedButton.querySelector('span.games, .games');\n      if (gamesSpan) {\n        const gamesText = gamesSpan.textContent;\n        const match = gamesText.match(/(\\d+)/);\n        runeData.games = match ? parseInt(match[1]) : null;\n        console.log('[Blitz] Rune games (fallback):', runeData.games);\n      }\n    }\n  }\n  \n  // Extract Primary Tree and Runes  \n  const primaryTree = document.querySelector('.tree.primary-tree');\n  if (primaryTree) {\n    // Get tree name\n    const treeImg = primaryTree.querySelector('.trees-row img.rune-active, .trees-row img.tree-img');\n    if (treeImg) {\n      runeData.primaryTree = treeImg.alt || 'Unknown';\n    }\n    \n    // Get keystone\n    const keystone = primaryTree.querySelector('.keystone-row img.keystone-img.rune-active');\n    if (keystone) {\n      runeData.keystone = keystone.alt || keystone.title || 'Unknown';\n      runeData.primaryRunes.push(runeData.keystone);\n      console.log('[Blitz] Keystone:', runeData.keystone);\n    }\n    \n    // Get other primary runes\n    const primaryRuneRows = primaryTree.querySelectorAll('.rune-row[data-row]');\n    primaryRuneRows.forEach(row => {\n      const activeRune = row.querySelector('img.rune-img.rune-active');\n      if (activeRune) {\n        const runeName = activeRune.alt || activeRune.title || 'Unknown';\n        runeData.primaryRunes.push(runeName);\n      }\n    });\n  }\n  \n  // Extract Secondary Tree and Runes\n  const secondaryTree = document.querySelector('.tree.secondary-tree');\n  if (secondaryTree) {\n    // Get tree name\n    const treeImg = secondaryTree.querySelector('.trees-row img.rune-active, .trees-row img.tree-img');\n    if (treeImg) {\n      runeData.secondaryTree = treeImg.alt || 'Unknown';\n    }\n    \n    // Get secondary runes\n    const secondaryRuneRows = secondaryTree.querySelectorAll('.rune-row[data-row]');\n    secondaryRuneRows.forEach(row => {\n      const activeRune = row.querySelector('img.rune-img.rune-active');\n      if (activeRune) {\n        const runeName = activeRune.alt || activeRune.title || 'Unknown';\n        runeData.secondaryRunes.push(runeName);\n      }\n    });\n  }\n  \n  // Extract Stat Mods\n  const shardRows = document.querySelectorAll('.shards-row');\n  shardRows.forEach(row => {\n    const activeShard = row.querySelector('img.shard-img.rune-active');\n    if (activeShard) {\n      let shardName = activeShard.alt || activeShard.title || '';\n      // Clean up shard name (remove \"lol:shardInfo.\" prefix if present)\n      if (shardName.includes(',')) {\n        shardName = shardName.split(',')[1].trim();\n      }\n      if (shardName) {\n        runeData.statMods.push(shardName);\n      }\n    }\n  });\n  \n  console.log('[Blitz] Primary runes:', runeData.primaryRunes);\n  console.log('[Blitz] Secondary runes:', runeData.secondaryRunes);\n  console.log('[Blitz] Stat mods:', runeData.statMods);\n  \n  return runeData;\n}\n\n// Main scraping function\nasync function scrapeBlitzData(item, config) {\n  const { url, championName, role } = item;\n  \n  console.log(`[Blitz] Scraping ${championName} - ${role}`);\n  console.log(`[Blitz] URL: ${url}`);\n  \n  const result = {\n    champion: championName,\n    role: role,\n    url: url,\n    buildOrder: null,\n    buildPath: null,\n    runes: null,\n    scraped: false,\n    errorMessage: null,\n    timestamp: new Date().toISOString()\n  };\n  \n  let browser;\n  \n  try {\n    // Section 1: Build Order with new browser\n    console.log('[Blitz] Section 1: Extracting Build Order...');\n    browser = await createBrowser(config);\n    const page1 = await setupPage(browser, url, config);\n    \n    result.buildOrder = await page1.evaluate(extractBuildOrder);\n    console.log(`[Blitz] Found ${result.buildOrder.items.length} build order items`);\n    \n    await browser.close();\n    browser = null;\n    \n    // Section 2: Build Path with new browser\n    console.log('[Blitz] Section 2: Extracting Build Path...');\n    browser = await createBrowser(config);\n    const page2 = await setupPage(browser, url, config);\n    \n    result.buildPath = await page2.evaluate(extractBuildPath);\n    console.log(`[Blitz] Found ${result.buildPath.items.length} build path items`);\n    \n    await browser.close();\n    browser = null;\n    \n    // Section 3: Runes with new browser\n    console.log('[Blitz] Section 3: Extracting Runes...');\n    browser = await createBrowser(config);\n    const page3 = await setupPage(browser, url, config);\n    \n    result.runes = await page3.evaluate(extractRunes);\n    console.log(`[Blitz] Extracted runes: ${result.runes.keystone || 'None'}`);\n    \n    await browser.close();\n    browser = null;\n    \n    result.scraped = true;\n    console.log(`[Blitz] ✅ Successfully scraped ${championName} - ${role}`);\n    \n  } catch (error) {\n    console.error(`[Blitz] ❌ Error scraping ${championName} - ${role}:`, error.message);\n    result.errorMessage = error.message;\n    result.scraped = false;\n  } finally {\n    if (browser) {\n      try {\n        await browser.close();\n      } catch (e) {\n        console.error('[Blitz] Error closing browser:', e.message);\n      }\n    }\n  }\n  \n  return result;\n}\n\n// Retry wrapper\nasync function scrapeWithRetry(item, config) {\n  let lastError;\n  \n  for (let attempt = 1; attempt <= config.BRIGHTDATA.MAX_RETRIES; attempt++) {\n    try {\n      console.log(`[Blitz] Attempt ${attempt}/${config.BRIGHTDATA.MAX_RETRIES} for ${item.championName}`);\n      const result = await scrapeBlitzData(item, config);\n      \n      if (result.scraped) {\n        return result;\n      }\n      \n      lastError = result.errorMessage;\n      \n      // Wait before retry with exponential backoff\n      if (attempt < config.BRIGHTDATA.MAX_RETRIES) {\n        const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000);\n        console.log(`[Blitz] Waiting ${waitTime}ms before retry...`);\n        await new Promise(resolve => setTimeout(resolve, waitTime));\n      }\n      \n    } catch (error) {\n      console.error(`[Blitz] Attempt ${attempt} failed:`, error.message);\n      lastError = error.message;\n      \n      if (attempt < config.BRIGHTDATA.MAX_RETRIES) {\n        const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000);\n        await new Promise(resolve => setTimeout(resolve, waitTime));\n      }\n    }\n  }\n  \n  // All retries failed\n  return {\n    champion: item.championName,\n    role: item.role,\n    url: item.url,\n    scraped: false,\n    errorMessage: `Failed after ${config.BRIGHTDATA.MAX_RETRIES} attempts: ${lastError}`,\n    timestamp: new Date().toISOString()\n  };\n}\n\n// Main execution\nreturn (async () => {\n  const startTime = Date.now();\n  const items = $input.all().map(item => item.json);\n  \n  console.log(`[Blitz] Starting Blitz.gg scraping for ${items.length} items`);\n  console.log(`[Blitz] First item:`, items[0]);\n  \n  if (!CONFIG.BRIGHTDATA.ZONE_PASSWORD) {\n    throw new Error('BRIGHTDATA_PASSWORD environment variable is required');\n  }\n  \n  try {\n    // Process all items\n    const results = await Promise.all(\n      items.map(item => scrapeWithRetry(item, CONFIG))\n    );\n    \n    // Summary\n    const successful = results.filter(r => r.scraped).length;\n    const failed = results.filter(r => !r.scraped).length;\n    const duration = ((Date.now() - startTime) / 1000).toFixed(2);\n    \n    console.log(`[Blitz] ✅ Scraping completed in ${duration}s`);\n    console.log(`[Blitz] Success: ${successful}/${items.length}`);\n    console.log(`[Blitz] Failed: ${failed}/${items.length}`);\n    \n    // Log failed items\n    if (failed > 0) {\n      console.log('[Blitz] Failed items:');\n      results.filter(r => !r.scraped).forEach(r => {\n        console.log(`  - ${r.champion} (${r.role}): ${r.errorMessage}`);\n      });\n    }\n    \n    // Sample successful result\n    const successSample = results.find(r => r.scraped && r.buildOrder && r.buildOrder.items.length > 0);\n    if (successSample) {\n      console.log('[Blitz] Sample successful result:');\n      console.log(JSON.stringify({\n        champion: successSample.champion,\n        role: successSample.role,\n        buildOrderCount: successSample.buildOrder.items.length,\n        buildOrderStats: {\n          winRate: successSample.buildOrder.winRate,\n          games: successSample.buildOrder.games\n        },\n        buildPathCount: successSample.buildPath.items.length,\n        runeStats: {\n          keystone: successSample.runes.keystone,\n          winRate: successSample.runes.winRate,\n          pickRate: successSample.runes.pickRate,\n          games: successSample.runes.games\n        }\n      }, null, 2));\n    }\n    \n    // Wrap results in json key for n8n compatibility\n    return results.map(item => ({ json: item }));\n    \n  } catch (error) {\n    console.error('[Blitz] Fatal error:', error);\n    throw error;\n  }\n})();"
+      },
+      "id": "4545a9db-0aad-48a4-aace-c8bf51a77f3e",
+      "name": "Scrape Blitz Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1504,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Store Blitz data in tier_meta_cache table\n-- This query handles data from Blitz.gg scraper workflow\n-- Usage: Use in n8n PostgreSQL node with \"Execute Query\" operation\n-- Input: Array of champion data items from previous node\n\nWITH input_data AS (\n  SELECT \n    json_array_elements($${{ JSON.stringify($input.all()) }}$$::json) AS item\n),\nexpanded_data AS (\n  SELECT \n    json_array_elements(item->'json'->'stored_items') AS stored_item,\n     (item->'json'->>'patch_version')::varchar(20) AS patch_version\n  FROM input_data\n)\nINSERT INTO tier_meta_cache (\n  champion, tier, role, server, source, patch_version, scraped_data, expires_at\n)\nSELECT\n  (stored_item->>'champion')::varchar(50),\n  COALESCE((stored_item->>'tier')::varchar(20), 'MASTER+'),\n  (stored_item->>'role')::varchar(20),\n  COALESCE((stored_item->>'server')::varchar(10), 'WORLD'),\n  'blitz.gg',\n  patch_version::varchar(20),\n  stored_item,\n  CURRENT_TIMESTAMP + INTERVAL '7 days'\nFROM expanded_data\nWHERE stored_item->>'champion' IS NOT NULL\n  AND stored_item->>'role' IS NOT NULL\nON CONFLICT (champion, tier, role, server, source, patch_version)\nDO UPDATE SET\n  scraped_data = EXCLUDED.scraped_data,\n  expires_at = EXCLUDED.expires_at\nRETURNING champion, role, tier, patch_version,\n  jsonb_pretty(scraped_data) as stored_data; ",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2128,
+        64
+      ],
+      "id": "ad299f05-353f-480b-8981-281dc914dcec",
+      "name": "Store in Tier Cache",
+      "credentials": {
+        "postgres": {
+          "id": "4qwHAJH4XRvQaOsd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1792,
+        64
+      ],
+      "id": "2f79241d-1bac-468c-a81a-70e2c2dd774b",
+      "name": "Merge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Wait 1 second": {
+      "main": [
+        [
+          {
+            "node": "Process in Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store in Database": {
+      "main": [
+        [
+          {
+            "node": "Store in Tier Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Track Meta Changes": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process in Batches": {
+      "main": [
+        [
+          {
+            "node": "Scrape Blitz Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Latest Patch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Completion Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Champion Lists": {
+      "main": [
+        [
+          {
+            "node": "Generate Blitz URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Role URLs": {
+      "main": [
+        [
+          {
+            "node": "Get Champion Lists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Collection": {
+      "main": [
+        [
+          {
+            "node": "Prepare Role URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Latest Patch": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Daily at 5 AM": {
+      "main": [
+        [
+          {
+            "node": "Start Collection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Blitz URLs": {
+      "main": [
+        [
+          {
+            "node": "Process in Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Blitz Data": {
+      "main": [
+        [
+          {
+            "node": "Track Meta Changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store in Tier Cache": {
+      "main": [
+        [
+          {
+            "node": "Wait 1 second",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Store in Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a852b38d-c8fb-40fd-b6d3-c7078cbce545",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "632105b63ad93b396ac21e2dcd244202b28fcdc6f71b8b1495bded7e462056e3"
+  },
+  "id": "QTbWOXrjR4rLkSCr",
+  "tags": []
+}
