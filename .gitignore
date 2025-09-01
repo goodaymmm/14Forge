@@ -138,3 +138,8 @@ temp/
 # *.mp4
 # *.avi
 # *.mov
+
+# Project-specific files to exclude
+n8n-setup-guide.md
+README_jp.md
+backend/api/test-n8n-webhook.json
